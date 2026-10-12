@@ -1,16 +1,16 @@
-<p align="center"><img src="assets/imgs/logo.svg" alt="TeamsBoard Logo" width="96" /></p>
+<p align="center"><img src="assets/imgs/logo.svg" alt="TeamBuddy Logo" width="96" /></p>
 
-<p align="center"><strong style="font-size: 2em;">TeamsBoard</strong></p>
+<p align="center"><strong style="font-size: 2em;">TeamBuddy</strong></p>
 
 <p align="center"><strong>A dashboard for managing multiple AI coding tools like Claude Code and Codex ,accelerating your workflow by up to 5x.</strong></p>
 
 <p align="center"><strong>English</strong> | <a href="README.md">简体中文</a> | <a href="#changelog">Changelog</a></p>
 
-![TeamsBoard](assets/imgs/image-20260825172159352.png)
+![TeamBuddy](assets/imgs/image-20260825172159352.png)
 
 ## Product Vision
 
-TeamsBoard is an all-in-one AI coding workbench for teams that **manages mainstream AI coding tools like Claude Code and Codex from a single panel**. It solves a core problem: **AI coding tools no longer work in silos across different terminals — they can be centrally orchestrated, organized, assigned, and tracked as productive team units**, boosting development efficiency by 5x through multi-agent parallel collaboration.
+TeamBuddy is an all-in-one AI coding workbench for teams that **manages mainstream AI coding tools like Claude Code and Codex from a single panel**. It solves a core problem: **AI coding tools no longer work in silos across different terminals — they can be centrally orchestrated, organized, assigned, and tracked as productive team units**, boosting development efficiency by 5x through multi-agent parallel collaboration.
 
 - **Unified Tool Management**: Connect mainstream AI coding tools like Claude Code, Codex, Cursor, and Qoder in one panel — configure CLIs, models, and prompts centrally, and switch between tools freely without opening multiple terminals.
 - **Task as Conversation**: Every task is paired with a dedicated Agent conversation workspace. The progress of a task **is** the process of collaborating with an Agent. Agents send confirmation requests at key decision points, leaving the final call to you.
@@ -69,14 +69,14 @@ TeamsBoard is an all-in-one AI coding workbench for teams that **manages mainstr
 
 ### 1. Download and Install
 
-TeamsBoard provides installers for Windows (x64/arm64) and macOS (x64/arm).
+TeamBuddy provides installers for Windows (x64/arm64) and macOS (x64/arm).
 
 | Platform | Download |
 |----------|----------|
-| Windows x64 | [Download](https://github.com/zhimaAi/TeamsBoard/releases/latest/download/TeamsBoard-windows-x64.exe) |
-| Windows arm64 | [Download](https://github.com/zhimaAi/TeamsBoard/releases/latest/download/TeamsBoard-windows-arm64.exe) |
-| macOS x64 | [Download](https://github.com/zhimaAi/TeamsBoard/releases/latest/download/TeamsBoard-macos-x64.dmg) |
-| macOS arm64 | [Download](https://github.com/zhimaAi/TeamsBoard/releases/latest/download/TeamsBoard-macos-arm64.dmg) |
+| Windows x64 | [Download](https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-windows-x64.exe) |
+| Windows arm64 | [Download](https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-windows-arm64.exe) |
+| macOS x64 | [Download](https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-macos-x64.dmg) |
+| macOS arm64 | [Download](https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-macos-arm64.dmg) |
 
 ### 2. Create a Pipeline and Bind a Local CLI
 
@@ -86,7 +86,7 @@ Open the client, navigate to **Expert Pipelines**, and you can create a new pipe
 
 ### 3. Create a Local Task
 
-TeamsBoard offers two ways to create a task:
+TeamBuddy offers two ways to create a task:
 
 - **Classic Mode**: Manually create a task on the Kanban board. Select a working directory (code directory) when creating the task.
 
@@ -104,7 +104,7 @@ Use the conversation workspace to monitor Agent execution progress, view results
 
 ## Supported CLIs
 
-TeamsBoard supports the following 13 CLI-based Agents, which can be bound to individual Agents in a pipeline:
+TeamBuddy supports the following 13 CLI-based Agents, which can be bound to individual Agents in a pipeline:
 
 | CLI | Description |
 |-----|-------------|
@@ -167,7 +167,7 @@ A frontend-focused pipeline covering interaction design, frontend architecture, 
 
 ## Community & Contact
 
-Feel free to reach out for help or to provide suggestions for improving TeamsBoard:
+Feel free to reach out for help or to provide suggestions for improving TeamBuddy:
 
 - **Email**: [jarvis@chatwiki.com](mailto:jarvis@chatwiki.com)
 - **GitHub Issues**: [Submit an Issue](https://github.com/your-org/goteams/issues)

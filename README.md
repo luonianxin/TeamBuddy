@@ -1,16 +1,16 @@
-<p align="center"><img src="assets/imgs/logo.svg" alt="TeamsBoard Logo" width="96" /></p>
+<p align="center"><img src="assets/imgs/logo.svg" alt="TeamBuddy Logo" width="96" /></p>
 
-<p align="center"><strong style="font-size: 2em;">TeamsBoard</strong></p>
+<p align="center"><strong style="font-size: 2em;">TeamBuddy</strong></p>
 
 <p align="center"><strong>一个面板管理多个 AI 编程工具（Claude Code、Codex 等），多 Agent 并行协作，让开发效率提升 5 倍</strong></p>
 
 <p align="center"><a href="README_en.md">English</a> | <strong>简体中文</strong> | <a href="#-更新记录">更新日志</a></p>
 
-![TeamsBoard](assets/imgs/image-20260825172159352.png)
+![TeamBuddy](assets/imgs/image-20260825172159352.png)
 
 ## 产品定位
 
-TeamsBoard 是一个面向团队的一体化 AI 编程工作台，**用一个面板统一管理 Claude Code、Codex 等主流 AI 编程工具**。它解决的核心问题是：**AI 编程工具不再各自为战、散落在不同终端，而是可以被统一调度、被组织、被指派、被跟踪的团队生产力单元**——多 Agent 并行协作，让开发效率提升 5 倍。
+TeamBuddy 是一个面向团队的一体化 AI 编程工作台，**用一个面板统一管理 Claude Code、Codex 等主流 AI 编程工具**。它解决的核心问题是：**AI 编程工具不再各自为战、散落在不同终端，而是可以被统一调度、被组织、被指派、被跟踪的团队生产力单元**——多 Agent 并行协作，让开发效率提升 5 倍。
 
 - **多工具统一管理**：一个面板接入 Claude Code、Codex、Cursor、Qoder 等主流 AI 编程工具，统一配置 CLI、模型与提示词，工具间自由切换，无需再开多个终端。
 - **任务即对话**：每项任务都绑定一个与 Agent 的对话工作台，任务的推进过程就是与 Agent 协作的过程。Agent 在关键节点向你发起确认请求，由人来做最终决策。
@@ -69,14 +69,14 @@ TeamsBoard 是一个面向团队的一体化 AI 编程工作台，**用一个面
 
 ###  1、下载并安装客户端
 
-TeamsBoard 提供Windows(x64/arm)、Mac os(x64/arm）安装包，可以直接下载安装
+TeamBuddy 提供Windows(x64/arm)、Mac os(x64/arm）安装包，可以直接下载安装
 
 | 平台          | 安装包                                                       |
 | ------------- | ------------------------------------------------------------ |
-| Windows x64   | [下载]( https://github.com/zhimaAi/TeamsBoard/releases/latest/download/TeamsBoard-windows-x64.exe) |
-| Windows arm64 | [下载]( https://github.com/zhimaAi/TeamsBoard/releases/latest/download/TeamsBoard-windows-arm64.exe) |
-| Mac os x64    | [下载]( https://github.com/zhimaAi/TeamsBoard/releases/latest/download/TeamsBoard-macos-x64.dmg) |
-| Mac os arm    | [下载]( https://github.com/zhimaAi/TeamsBoard/releases/latest/download/TeamsBoard-macos-arm64.dmg) |
+| Windows x64   | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-windows-x64.exe) |
+| Windows arm64 | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-windows-arm64.exe) |
+| Mac os x64    | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-macos-x64.dmg) |
+| Mac os arm    | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-macos-arm64.dmg) |
 
 ### 2、创建流水线，绑定本地cli
 
@@ -86,7 +86,7 @@ TeamsBoard 提供Windows(x64/arm)、Mac os(x64/arm）安装包，可以直接下
 
 ### 3、创建一个本地任务
 
-Teamsboard提供了两种方式来创建任务。
+TeamBuddy提供了两种方式来创建任务。
 
 - 经典模式：在看板中手动创建任务，创建任务时需要选择工作目录（代码目录），
 
@@ -104,7 +104,7 @@ Teamsboard提供了两种方式来创建任务。
 
 ## 支持的CLI
 
-TeamsBoard 支持以下 13 种 CLI Agent，可在流水线中为每个 Agent 绑定本地 CLI：
+TeamBuddy 支持以下 13 种 CLI Agent，可在流水线中为每个 Agent 绑定本地 CLI：
 
 | CLI | 说明 |
 | --- | --- |
