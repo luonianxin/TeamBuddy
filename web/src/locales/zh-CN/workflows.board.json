@@ -5,6 +5,8 @@
   "layoutSwitch": "看板与列表视图切换",
   "boardView": "看板视图",
   "listView": "列表视图",
+  "searchTasks": "搜索任务",
+  "noMatchingTasks": "未找到匹配任务",
   "teamWork": "团队工作",
   "comingSoon": "功能开发中，即将上线",
   "newTask": "新增任务",

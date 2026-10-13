@@ -33,7 +33,7 @@ import (
 
 // AccountManagerInterface account manager interface (implemented by bootstrap.AccountManager)
 type AccountManagerInterface interface {
-	LoginAndCreateSession(ctx context.Context, adminID, userID, userName, token string, opts LoginOptions) (*SessionInfo, error)
+	LoginAndCreateSession(ctx context.Context, adminID, userID, userName, displayName, token string, opts LoginOptions) (*SessionInfo, error)
 	Logout()
 	IsLoggedIn() bool
 }
@@ -61,20 +61,23 @@ type Config struct {
 	CodexSkillReady  bool
 	CodexSkillReason string
 	VibeSkills       []VibeSkillStatus
-	BaseProfileDir   string
-	BootstrapStore   secrets.Store
-	SecretStore      *secrets.DelegatingStore
-	CloudConfig      *config.CloudConfig
-	BrowserTicket    string
-	DesktopToken     string
-	APIToken         string
-	APITokenFromEnv  bool
-	Shutdown         func()
-	CloudClient      *cloud.Client
-	AccountMgr       AccountManagerInterface
-	TaskDB           *sql.DB
-	Orchestrator     *workflow.Orchestrator
-	WSHub            *WSHub
+	// VibeImBotSkills 记录每个 Vibe Coding 工具对应的 teamsboard-im-bot-cli Skill 安装状态。
+	// 微信通道兜底流程通过 markdown 本地路径让 CLI 加载此 Skill，路径由 wechatRemote 按 cliType 查询。
+	VibeImBotSkills map[string]VibeImBotSkillStatus
+	BaseProfileDir  string
+	BootstrapStore  secrets.Store
+	SecretStore     *secrets.DelegatingStore
+	CloudConfig     *config.CloudConfig
+	BrowserTicket   string
+	DesktopToken    string
+	APIToken        string
+	APITokenFromEnv bool
+	Shutdown        func()
+	CloudClient     *cloud.Client
+	AccountMgr      AccountManagerInterface
+	TaskDB          *sql.DB
+	Orchestrator    *workflow.Orchestrator
+	WSHub           *WSHub
 }
 
 // SessionInfo session information of the current login account
@@ -87,6 +90,7 @@ type SessionInfo struct {
 	AdminID     string
 	UserID      string
 	UserName    string
+	DisplayName string
 	// ServerURL 登录目标云端地址（normalized）。官方登录用它校验会话与当前配置的
 	// 远程域名一致，防止共享本地数据目录的多个实例互相串用登录态；custom 登录的
 	// 地址由用户主动选择，不受内置配置约束。
@@ -122,19 +126,20 @@ func (h *sessionHolder) clear() {
 
 // Server local HTTP service
 type Server struct {
-	config        Config
-	router        *gin.Engine
-	remoteWeChat  *wechatRemote
-	tasksHandler  *TasksHandler
-	sessions      *sessionHolder
-	dbRef         *storage.DBRef
-	lastLogin     *lastLoginInfo
-	profile       *LocalProfile
-	profileMu     sync.Mutex
-	profileDir    string
-	ticketMu      sync.Mutex
-	ticket        string
-	browserLogins *browserLoginManager
+	authTransitionMu sync.Mutex
+	config           Config
+	router           *gin.Engine
+	remoteWeChat     *wechatRemote
+	tasksHandler     *TasksHandler
+	sessions         *sessionHolder
+	dbRef            *storage.DBRef
+	lastLogin        *lastLoginInfo
+	profile          *LocalProfile
+	profileMu        sync.Mutex
+	profileDir       string
+	ticketMu         sync.Mutex
+	ticket           string
+	browserLogins    *browserLoginManager
 }
 
 // New creates a local service instance
@@ -198,6 +203,27 @@ func (s *Server) currentAccountID() (string, error) {
 		return "", fmt.Errorf("当前未登录")
 	}
 	return sess.UserID, nil
+}
+
+// accountBrowserSession 返回当前账号会话（云登录态）的浏览器会话视图，供 SkillSurface /
+// wechatRemote 注入 ctx 使用。回退口径与 validateSession 完全一致：只有会话域名与当前配置
+// 匹配（官方登录）或 custom 会话自带地址时才成立，避免共享数据目录时串用其他实例的登录态；
+// 不成立时返回 nil，调用方按「未登录」处理。
+func (s *Server) accountBrowserSession() func() *browserSession {
+	return func() *browserSession {
+		cur := s.currentSession()
+		if !s.sessionMatchesConfig(cur) {
+			return nil
+		}
+		return &browserSession{
+			ID:        "account",
+			UserID:    cur.UserID,
+			UserName:  cur.UserName,
+			AdminID:   cur.AdminID,
+			CreatedAt: time.Now(),
+			ExpiresAt: time.Now().Add(sessionValidity),
+		}
+	}
 }
 
 // switchProfile opens the fixed base profile and selects its credential store.
@@ -370,8 +396,24 @@ func (s *Server) buildRouter() *gin.Engine {
 	tasksGroup := local.Group("/tasks")
 	tasksHandler.RegisterRoutes(tasksGroup)
 	tasksHandler.RegisterSkillRoutes(local.Group("/task-skill", requireTaskSkillCaller()))
-	s.remoteWeChat = newWeChatRemote(s.config.TaskDB, s.config.BootstrapStore, s.config.Orchestrator, tasksHandler)
+	s.remoteWeChat = newWeChatRemote(s.config.TaskDB, s.config.BootstrapStore, s.config.Orchestrator, tasksHandler, s.config.TaskRoot, s.config.VibeImBotSkills)
 	s.remoteWeChat.registerRoutes(local.Group("/remote-channels"))
+	// 账号会话 getter：与 validateSession 完全一致的回退口径（有 cookie 会话优先，否则用
+	// currentSession() 且会话域名与当前配置匹配）。SkillSurface 与 wechatRemote 共用同一份，
+	// 不新开 token 通道、不落盘。
+	accountSession := s.accountBrowserSession()
+	s.remoteWeChat.attachAccountSession(accountSession)
+	// S-BE006: 注册 CLI Skill 路由（使用独立的 /cli-skill 路径避免与 task-skill 冲突）。
+	// 计划 §四：唯一业务实现位于 SkillSurface，handler 与微信快路径共用，避免漂移。
+	// 装配顺序：NewTasksHandler → RegisterRoutes/RegisterSkillRoutes → newWeChatRemote →
+	// attachAccountSession → NewSkillSurface → attachSkillSurface → RegisterCLISkillRoutes。
+	// wechatRemote 以 wechatEnqueuer 窄接口注入，装配顺序不再是正确性前提。
+	cliSkillSurface := NewSkillSurface(s.config.TaskDB, s.currentCloudClient, tasksHandler, s.remoteWeChat,
+		s.currentOrchestrator, s.config.VibeSkills, s.config.SkillsRoot,
+		s.config.CodexSkillReady, s.config.CodexSkillReason, accountSession)
+	cliSkillSurface.RegisterCLISkillRoutes(local.Group("/cli-skill", requireTaskSkillCaller()))
+	// 把 SkillSurface 注入 wechatRemote，让 handleMessage 能复用 lookup / write。
+	s.remoteWeChat.attachSkillSurface(cliSkillSurface)
 	iconStore := NewIconStore(s.config.DataDir)
 	local.GET("/assets/icons/:filename", iconStore.Serve)
 	pipelinesHandler := NewPipelinesHandler(s.currentSessionDB, iconStore, s.currentCloudClient)
@@ -473,7 +515,8 @@ func (w *errorResponseWriter) capture(data []byte) {
 // 鉴权 token（header X-GoTeams-Api-Token，WS 在 handler 内校验 query）。
 // 浏览器无法为静态页面和 img 请求添加 header，因此非 /api/ 路径（页面与静态
 // 资源）以及只读受管图标路径放行；health 由 Electron 探测、auth/* 是登录与
-// 握手入口、desktop/shutdown 已有独立 token，均放行。
+// 握手入口、desktop/shutdown 已有独立 token，均放行。task-skill 和 cli-skill
+// 使用各自的协议标记头（X-GoTeams-Skill-Client）替代 API Token，也放行。
 func (s *Server) requireAPIToken() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -483,6 +526,7 @@ func (s *Server) requireAPIToken() gin.HandlerFunc {
 			(c.Request.Method == http.MethodGet && strings.HasPrefix(path, ManagedIconURLPrefix)) ||
 			strings.HasPrefix(path, "/api/local/auth/") ||
 			strings.HasPrefix(path, "/api/local/task-skill/") ||
+			strings.HasPrefix(path, "/api/local/cli-skill/") ||
 			!strings.HasPrefix(path, "/api/") {
 			c.Next()
 			return

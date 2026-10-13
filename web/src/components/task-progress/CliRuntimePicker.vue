@@ -28,6 +28,12 @@
               @click="selectCli(cli)"
             >
               <span class="cli-picker-name">
+                <img
+                  class="cli-picker-logo"
+                  :src="cliLogo(cli.type)"
+                  alt=""
+                  aria-hidden="true"
+                />
                 <span
                   class="cli-picker-dot"
                   :class="cli.installed ? 'is-available' : 'is-unavailable'"
@@ -94,6 +100,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import cliPickerCheckIcon from '@/assets/icons/cli-picker-check.svg'
+import { cliLogo } from '@/composables/useCliLogo'
 import type { DiscoveredCLI } from '@/views/agents/components/agentPipeline'
 import { useAppI18n } from '@/i18n'
 
@@ -160,8 +167,6 @@ function selectModel(model: string) {
 .cli-picker-models {
   min-height: 0;
   overflow-y: auto;
-  scrollbar-color: #d8dde5 transparent;
-  scrollbar-width: thin;
 }
 
 .cli-picker-clis {
@@ -242,6 +247,18 @@ function selectModel(model: string) {
 
 .cli-picker-item.is-unavailable .cli-picker-name {
   color: #bfbfbf;
+}
+
+.cli-picker-logo {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  object-fit: contain;
+}
+
+.cli-picker-item.is-unavailable .cli-picker-logo {
+  opacity: 0.4;
+  filter: grayscale(1);
 }
 
 .cli-picker-label {

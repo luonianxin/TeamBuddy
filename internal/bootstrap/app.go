@@ -35,15 +35,19 @@ type App struct {
 	codexSkillReady  bool
 	codexSkillReason string
 	vibeSkills       []localserver.VibeSkillStatus
-	cloud            *config.CloudConfig
-	secretStore      *secrets.DelegatingStore
-	bootstrapStore   secrets.Store
-	server           *localserver.Server
-	listener         net.Listener
-	browserTicket    string
-	apiToken         string
-	apiTokenFromEnv  bool
-	lock             interface{}
+	// vibeImBotSkills 记录每个 Vibe Coding 工具对应的 teamsboard-im-bot-cli Skill 安装状态。
+	// teamsboard-im-bot-cli 与 teamsboard 共用 VibeSkillRoot，按工具分别安装到 ~/.codex/skills、~/.claude/skills 等。
+	// 微信通道兜底任务的 prompt 直接通过 markdown 本地路径引用此 Skill，CLI 启动后自行加载。
+	vibeImBotSkills map[string]localserver.VibeImBotSkillStatus
+	cloud           *config.CloudConfig
+	secretStore     *secrets.DelegatingStore
+	bootstrapStore  secrets.Store
+	server          *localserver.Server
+	listener        net.Listener
+	browserTicket   string
+	apiToken        string
+	apiTokenFromEnv bool
+	lock            interface{}
 
 	//Basic components (not dependent on database)
 	cloudClient  *cloud.Client
@@ -82,6 +86,7 @@ func New(ctx context.Context) (*App, error) {
 		return nil, fmt.Errorf("获取实例锁失败: %w", err)
 	}
 	app.codexSkillReady, app.codexSkillReason, app.vibeSkills = app.installBuiltinSkills()
+	app.vibeImBotSkills = installImBotCLISkills(app.vibeSkills)
 
 	// 4. Initialize SecretStore.
 	store := secrets.NewDelegating()
@@ -181,6 +186,7 @@ func (a *App) Run(ctx context.Context) error {
 		CodexSkillReady:  a.codexSkillReady,
 		CodexSkillReason: a.codexSkillReason,
 		VibeSkills:       a.vibeSkills,
+		VibeImBotSkills:  a.vibeImBotSkills,
 		BaseProfileDir:   a.dataDir,
 		BootstrapStore:   a.bootstrapStore,
 		SecretStore:      a.secretStore,
@@ -215,9 +221,8 @@ func (a *App) Run(ctx context.Context) error {
 		return nil
 	}).Start(runCtx)
 
-	// Push the task projection whenever a CLI session finishes asynchronously; the HTTP
-	// handlers already push for user-triggered actions. Non-cloud tasks are skipped
-	// inside the pusher.
+	// 会话进入终态后，把这一轮的执行过程和执行结果推到云端。这里不改本地任务泳道，
+	// 也不改云端需求状态；两边的状态各自保留。专家团路由中的中间态只推任务投影。
 	a.localRuntime.Orchestrator.AddStateListener(func(taskUUID, stepKey, sessionUUID, status string) {
 		var client *cloud.Client
 		if sess := a.accountMgr.Current(); sess != nil {
@@ -227,8 +232,18 @@ func (a *App) Run(ctx context.Context) error {
 			return
 		}
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			timeout := 30 * time.Second
+			if sessionStatusUploadsExecution(status) {
+				timeout = 2 * time.Minute
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
+			if sessionStatusUploadsExecution(status) {
+				if err := cloudsync.FlushTaskExecution(ctx, a.localRuntime.DB, client, taskUUID); err != nil {
+					applog.Warn("[CloudSync] 会话结束后同步执行记录失败", "task_uuid", taskUUID, "status", status, "error", err.Error())
+				}
+				return
+			}
 			if err := cloudsync.DefaultPusher().PushTaskSync(ctx, a.localRuntime.DB, client, taskUUID); err != nil {
 				applog.Warn("[CloudSync] 会话结束后推送任务结果失败", "task_uuid", taskUUID, "error", err.Error())
 			}
@@ -269,6 +284,19 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// sessionStatusUploadsExecution reports whether this callback is a finished CLI
+// session. Expert-group routing uses other status names and must not upload the
+// whole execution body on every hop. "failed" is shared; uploading once there is
+// still the execution result, not a status change on either side.
+func sessionStatusUploadsExecution(status string) bool {
+	switch status {
+	case "success", "failed", "stopped", "interrupted":
+		return true
+	default:
+		return false
+	}
 }
 
 // initDirs initializes the data-root directory structure. The data root

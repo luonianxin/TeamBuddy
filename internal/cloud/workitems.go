@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // uploadAssetRe matches src=/href= attributes whose value points to a cloud
@@ -15,6 +18,13 @@ import (
 // be rendered by the local client because they are relative to the cloud site
 // root; they must be prefixed with the cloud origin (scheme://host).
 var uploadAssetRe = regexp.MustCompile(`(?i)(src|href)\s*=\s*("|')(/uploads[^"']*)("|')`)
+
+// contentAssetAttrRe extracts URL-bearing attributes from work-item rich text.
+// It intentionally stays limited to src/href so refreshing a temporary asset
+// signature cannot alter unrelated text or HTML attributes in the task snapshot.
+var contentAssetAttrRe = regexp.MustCompile(`(?i)(src|href)\s*=\s*("|')([^"']+)("|')`)
+
+const signedAssetRefreshLead = 5 * time.Minute
 
 // WorkItem cloud work item
 type WorkItem struct {
@@ -169,14 +179,15 @@ func (c *Client) contentOrigin() string {
 // local client. Already-absolute URLs are left untouched (idempotent).
 func (c *Client) normalizeWorkItems(items []WorkItem) {
 	for i := range items {
-		items[i].Description = c.normalizeWorkItemContent(items[i].Description)
+		items[i].Description = c.NormalizeWorkItemContent(items[i].Description)
 	}
 }
 
-// normalizeWorkItemContent rewrites relative /uploads/... asset URLs (in src or
+// NormalizeWorkItemContent rewrites relative /uploads/... asset URLs (in src or
 // href attributes) in the given HTML fragment into absolute http/https URLs
-// using the cloud origin.
-func (c *Client) normalizeWorkItemContent(description string) string {
+// using the cloud origin. It is exported so locally cached cloud task snapshots
+// can be normalized again when they are read by newer clients.
+func (c *Client) NormalizeWorkItemContent(description string) string {
 	origin := c.contentOrigin()
 	if origin == "" || description == "" {
 		return description
@@ -185,6 +196,108 @@ func (c *Client) normalizeWorkItemContent(description string) string {
 	// replacement template.
 	escaped := strings.ReplaceAll(origin, "$", "$$")
 	return uploadAssetRe.ReplaceAllString(description, `${1}=${2}`+escaped+`${3}${4}`)
+}
+
+// WorkItemContentNeedsAssetRefresh reports whether content contains an OSS/S3
+// presigned asset URL that has expired or will expire shortly. Cloud work-item
+// descriptions may contain short-lived URLs, while local tasks retain the
+// description as a long-lived snapshot.
+func WorkItemContentNeedsAssetRefresh(content string, now time.Time) bool {
+	for _, match := range contentAssetAttrRe.FindAllStringSubmatch(content, -1) {
+		if len(match) == 5 && temporarySignedURLNeedsRefresh(match[3], now) {
+			return true
+		}
+	}
+	return false
+}
+
+// RefreshWorkItemContentAssetURLs replaces only temporary signed URLs in a
+// task snapshot with URLs for the same object path from freshly loaded cloud
+// content. Text and all other HTML remain the original task snapshot.
+func RefreshWorkItemContentAssetURLs(snapshot, fresh string) string {
+	freshByPath := make(map[string]string)
+	for _, match := range contentAssetAttrRe.FindAllStringSubmatch(fresh, -1) {
+		if len(match) != 5 || match[2] != match[4] {
+			continue
+		}
+		if path := assetObjectPath(match[3]); path != "" {
+			freshByPath[path] = match[3]
+		}
+	}
+	if len(freshByPath) == 0 {
+		return snapshot
+	}
+
+	return contentAssetAttrRe.ReplaceAllStringFunc(snapshot, func(attribute string) string {
+		match := contentAssetAttrRe.FindStringSubmatch(attribute)
+		if len(match) != 5 || match[2] != match[4] || !isTemporarySignedURL(match[3]) {
+			return attribute
+		}
+		freshURL := freshByPath[assetObjectPath(match[3])]
+		if freshURL == "" || freshURL == match[3] {
+			return attribute
+		}
+		return strings.Replace(attribute, match[3], freshURL, 1)
+	})
+}
+
+func temporarySignedURLNeedsRefresh(rawURL string, now time.Time) bool {
+	u, ok := parseHTTPAssetURL(rawURL)
+	if !ok {
+		return false
+	}
+	query := u.Query()
+	issuedText := queryValueFold(query, "X-Amz-Date")
+	expiresText := queryValueFold(query, "X-Amz-Expires")
+	if issuedText == "" || expiresText == "" || queryValueFold(query, "X-Amz-Signature") == "" {
+		return false
+	}
+	issuedAt, err := time.Parse("20060102T150405Z", issuedText)
+	if err != nil {
+		return true
+	}
+	expiresSeconds, err := strconv.ParseInt(expiresText, 10, 64)
+	if err != nil || expiresSeconds <= 0 || expiresSeconds > int64((31*24*time.Hour)/time.Second) {
+		return true
+	}
+	expiresAt := issuedAt.Add(time.Duration(expiresSeconds) * time.Second)
+	return !now.Add(signedAssetRefreshLead).Before(expiresAt)
+}
+
+func isTemporarySignedURL(rawURL string) bool {
+	u, ok := parseHTTPAssetURL(rawURL)
+	if !ok {
+		return false
+	}
+	query := u.Query()
+	return queryValueFold(query, "X-Amz-Date") != "" &&
+		queryValueFold(query, "X-Amz-Expires") != "" &&
+		queryValueFold(query, "X-Amz-Signature") != ""
+}
+
+func assetObjectPath(rawURL string) string {
+	u, ok := parseHTTPAssetURL(rawURL)
+	if !ok {
+		return ""
+	}
+	return u.EscapedPath()
+}
+
+func parseHTTPAssetURL(rawURL string) (*url.URL, bool) {
+	u, err := url.Parse(html.UnescapeString(strings.TrimSpace(rawURL)))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" {
+		return nil, false
+	}
+	return u, true
+}
+
+func queryValueFold(values url.Values, key string) string {
+	for candidate, entries := range values {
+		if strings.EqualFold(candidate, key) && len(entries) > 0 {
+			return entries[0]
+		}
+	}
+	return ""
 }
 
 // normalizeAssetURL rewrites a cloud-relative asset URL (e.g. the pipeline/step
@@ -208,6 +321,69 @@ func (c *Client) normalizeAssetURL(rawURL string) string {
 		return origin + rawURL
 	}
 	return rawURL
+}
+
+// LookupMyWorkItem finds one assigned work item by id. Requirement and defect ids
+// share one table, so the id alone identifies the workspace and the real type.
+// The paginated import list is not a substitute: it only returns the newest page
+// and labels every row as a requirement.
+func LookupMyWorkItem(list []map[string]interface{}, workItemID string) (workspaceID int64, itemType string, found bool) {
+	want := strings.TrimSpace(workItemID)
+	if want == "" {
+		return 0, "", false
+	}
+	for _, item := range list {
+		if item == nil || myWorkIDString(item["id"]) != want {
+			continue
+		}
+		workspaceID = myWorkInt64(item["workspace_id"])
+		if workspaceID <= 0 {
+			continue
+		}
+		itemType, _ = item["type"].(string)
+		return workspaceID, strings.TrimSpace(itemType), true
+	}
+	return 0, "", false
+}
+
+func myWorkIDString(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case float64:
+		return strconv.FormatInt(int64(typed), 10)
+	case json.Number:
+		return typed.String()
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	default:
+		if value == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func myWorkInt64(value interface{}) int64 {
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed)
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return parsed
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		return parsed
+	default:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(fmt.Sprint(value)), 10, 64)
+		return parsed
+	}
 }
 
 // GetMyWork Gets all the work items that the currently logged in user is responsible for.
@@ -237,10 +413,10 @@ func (c *Client) normalizeWorkItemMap(item map[string]interface{}) {
 		return
 	}
 	if desc, ok := item["description"].(string); ok && desc != "" {
-		item["description"] = c.normalizeWorkItemContent(desc)
+		item["description"] = c.NormalizeWorkItemContent(desc)
 	}
 	if content, ok := item["content"].(string); ok && content != "" {
-		item["content"] = c.normalizeWorkItemContent(content)
+		item["content"] = c.NormalizeWorkItemContent(content)
 	}
 }
 

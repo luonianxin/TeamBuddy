@@ -1,4 +1,4 @@
-// Package cursor 提供 Cursor Agent CLI（安装后命令为 agent / cursor-agent）的执行适配。
+// Package cursor 提供官方 Cursor CLI 的执行适配。安装命令是 agent，不是 IDE 的 cursor，也不是兼容名 cursor-agent。
 //
 // 协议（--output-format stream-json，逐行 JSON）：
 //
@@ -23,7 +23,7 @@ import (
 	"goteams-client/internal/executor"
 )
 
-const displayName = "Cursor Agent"
+const displayName = "Cursor CLI"
 
 // NewAdapter 创建 Cursor Agent 适配器。
 func NewAdapter() executor.Adapter {
@@ -202,12 +202,12 @@ func (d *Decoder) decodeToolCall(event cursorEvent, emit executor.EmitFunc) {
 	switch event.Subtype {
 	case "started":
 		d.calls[callID] = true
-		d.ToolCall(callID, name, summarizeArgs(toolKey, args), emit)
+		d.ToolCallKind(callID, name, summarizeArgs(toolKey, args), cursorToolKind(toolKey), emit)
 	case "completed":
 		// 个别工具可能只在结果行出现，补发调用事件保证过程完整。
 		if !d.calls[callID] {
 			d.calls[callID] = true
-			d.ToolCall(callID, name, summarizeArgs(toolKey, args), emit)
+			d.ToolCallKind(callID, name, summarizeArgs(toolKey, args), cursorToolKind(toolKey), emit)
 		}
 		d.ToolResult(callID, summarizeResult(payload), emit)
 	}
@@ -238,6 +238,13 @@ func extractToolArgs(payload map[string]any) map[string]any {
 }
 
 // buildToolName 把协议的工具键转成可读名：readToolCall -> Read。
+func cursorToolKind(toolKey string) string {
+	if toolKey == "shellToolCall" {
+		return executor.ToolKindShell
+	}
+	return ""
+}
+
 func buildToolName(raw string) string {
 	name := strings.TrimSuffix(raw, "ToolCall")
 	if name == "" {

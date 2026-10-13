@@ -3,8 +3,8 @@
 const path = require('node:path')
 const { spawn } = require('node:child_process')
 const { app, dialog, Menu, session, shell, Tray } = require('electron')
-const { APP_ICON_PATH, configureAppIdentity } = require('./app-identity.cjs')
-const { BackendSupervisor } = require('./backend-supervisor.cjs')
+const { APP_TRAY_ICON_PATH, configureAppIdentity } = require('./app-identity.cjs')
+const { BackendSupervisor, resolveBackendLaunch } = require('./backend-supervisor.cjs')
 const { DesktopPreferences } = require('./desktop-preferences.cjs')
 const { setLocale, t } = require('./desktop-i18n.cjs')
 const { createBrowserLoginDeepLink, registerProtocolClient } = require('./deep-link.cjs')
@@ -13,6 +13,7 @@ const { registerApiTokenIPC } = require('./ipc/api-token.cjs')
 const { registerBrowserLoginIPC, notifyBrowserLoginResult } = require('./ipc/browser-login.cjs')
 const { registerCodexIPC } = require('./ipc/codex.cjs')
 const { registerVibeCliIPC } = require('./ipc/vibe-cli.cjs')
+const { mcpBackendPath } = require('./vibe-mcp/codex-cli.cjs')
 const { registerTaskNotificationIPC } = require('./ipc/notification.cjs')
 const { registerTrayIPC } = require('./ipc/tray.cjs')
 const { registerUpdateIPC } = require('./ipc/update.cjs')
@@ -263,7 +264,7 @@ function createTray() {
   trayManager = new TrayManager({
     Tray,
     Menu,
-    iconPath: APP_ICON_PATH,
+    iconPath: APP_TRAY_ICON_PATH,
     onShowWindow: showOrCreateMainWindow,
     onHideWindow: hideMainWindow,
     onQuit: () => void requestQuit(),
@@ -306,7 +307,14 @@ async function startApplication() {
   removeApiTokenIPC = registerApiTokenIPC(created.allowedOrigins, backendConnection.apiToken)
   removeBrowserLoginIPC = registerBrowserLoginIPC(created.allowedOrigins, () => backendConnection)
   removeCodexIPC = registerCodexIPC(created.allowedOrigins)
-  removeVibeCliIPC = registerVibeCliIPC(created.allowedOrigins)
+  removeVibeCliIPC = registerVibeCliIPC(created.allowedOrigins, {
+    backendPath: () => mcpBackendPath(resolveBackendLaunch({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      repoRoot,
+      platform: process.platform,
+    }).command),
+  })
   removeTaskNotificationIPC = registerTaskNotificationIPC(created.allowedOrigins, {
     getMainWindow: () => mainWindow,
     showOrCreateMainWindow,

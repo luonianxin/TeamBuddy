@@ -44,8 +44,12 @@ func CreateProcessGroup(cmd *exec.Cmd) {
 	}
 }
 
-// The maximum time to wait for the process to exit itself after terminateGracePeriod SIGTERM.
-const terminateGracePeriod = 3 * time.Second
+// terminateGracePeriod 是 SIGTERM 之后等待进程自己退出的时间。
+// 进程一旦退出就立刻返回，不会无条件睡满这段时间。
+const terminateGracePeriod = 5 * time.Second
+
+// terminateKillWait 是 SIGKILL 之后确认进程组清空的时间。
+const terminateKillWait = 5 * time.Second
 
 // terminatePollInterval The interval for polling whether the process group has exited.
 const terminatePollInterval = 50 * time.Millisecond
@@ -53,32 +57,46 @@ const terminatePollInterval = 50 * time.Millisecond
 // TerminateProcessTree terminates the process tree.
 //
 // First SIGTERM gives the process a chance to clean up by itself, and then polls for detection; once the process group exits, it will return immediately.
-// No longer unconditionally sleep for 3 seconds - most CLIs will exit within tens of milliseconds.
-// Fixed waiting will cause the "stop execution" operation to be obviously stuck.
 func TerminateProcessTree(pgid int) error {
-	//Send SIGTERM first
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
-		// The process may have exited
-		if err == syscall.ESRCH {
-			return nil
-		}
-	}
+	return terminateProcessGroup(pgid, terminateGracePeriod, terminateKillWait)
+}
 
-	deadline := time.Now().Add(terminateGracePeriod)
-	for time.Now().Before(deadline) {
-		// Signal 0 only does existence detection and does not actually deliver the signal.
+func terminateProcessGroup(pgid int, termGrace, killWait time.Duration) error {
+	if pgid <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		// 继续尝试强杀。ESRCH 表示进程组已经不存在。
+	}
+	if waitGroupGone(pgid, termGrace) {
+		return nil
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		return fmt.Errorf("SIGKILL 失败: %w", err)
+	}
+	waitGroupGone(pgid, killWait)
+	return nil
+}
+
+func waitGroupGone(pgid int, grace time.Duration) bool {
+	if grace <= 0 {
+		return syscall.Kill(-pgid, 0) == syscall.ESRCH
+	}
+	deadline := time.Now().Add(grace)
+	for {
 		if err := syscall.Kill(-pgid, 0); err == syscall.ESRCH {
-			return nil
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
 		}
 		time.Sleep(terminatePollInterval)
 	}
+}
 
-	// If no exit occurs within the grace period, force SIGKILL
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		if err == syscall.ESRCH {
-			return nil
-		}
-		return fmt.Errorf("SIGKILL 失败: %w", err)
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
 	}
-	return nil
+	return syscall.Kill(pid, 0) == nil
 }

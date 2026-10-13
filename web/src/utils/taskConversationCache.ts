@@ -202,6 +202,33 @@ export async function deleteTaskView(taskUuid: string) {
   await transactionCompleted(transaction)
 }
 
+export async function removeDeletedTaskFromCache(taskUuid: string) {
+  const database = await openDatabase()
+  const transaction = database.transaction(
+    [NOTIFICATION_STORE, TASK_VIEW_STORE, VIEW_STATE_STORE], 'readwrite',
+  )
+  const completed = transactionCompleted(transaction)
+  transaction.objectStore(TASK_VIEW_STORE).delete(taskUuid)
+  const notifications = transaction.objectStore(NOTIFICATION_STORE)
+  const snapshot = notifications.get(NOTIFICATION_SNAPSHOT_KEY) as IDBRequest<NotificationSnapshotRecord | undefined>
+  snapshot.onsuccess = () => {
+    if (snapshot.result) {
+      notifications.put({
+        ...snapshot.result,
+        items: snapshot.result.items.filter((item) => item.task_uuid !== taskUuid),
+      })
+    }
+  }
+  const viewStates = transaction.objectStore(VIEW_STATE_STORE)
+  const viewState = viewStates.get(VIEW_STATE_KEY) as IDBRequest<ViewStateRecord | undefined>
+  viewState.onsuccess = () => {
+    if (viewState.result?.lastSelectedTaskUuid === taskUuid) {
+      viewStates.put({ ...viewState.result, lastSelectedTaskUuid: '' })
+    }
+  }
+  await completed
+}
+
 export async function deleteTaskViewsOutside(validTaskUuids: Set<string>) {
   const database = await openDatabase()
   const transaction = database.transaction(TASK_VIEW_STORE, 'readwrite')

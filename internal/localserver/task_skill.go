@@ -1,6 +1,7 @@
 package localserver
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -100,9 +101,10 @@ func (h *TasksHandler) getTaskForSkill(c *gin.Context) {
 	}
 	var sourceType, title, description, status, legacyWorkDir, executionMode, executionTool string
 	var createdAt, updatedAt int64
+	var executionIndex int
 	err := h.taskDB().QueryRowContext(c.Request.Context(), `SELECT source_type, title, content_snapshot, status, work_dir,
-		execution_mode, execution_tool, created_at, updated_at FROM gt_tasks WHERE uuid=?`, taskUUID).Scan(
-		&sourceType, &title, &description, &status, &legacyWorkDir, &executionMode, &executionTool, &createdAt, &updatedAt,
+		execution_mode, execution_tool, created_at, updated_at, execution_index FROM gt_tasks WHERE uuid=?`, taskUUID).Scan(
+		&sourceType, &title, &description, &status, &legacyWorkDir, &executionMode, &executionTool, &createdAt, &updatedAt, &executionIndex,
 	)
 	if err == sql.ErrNoRows {
 		i18n.Error(c, http.StatusNotFound, "localserver_task_not_found", "task_not_found")
@@ -130,7 +132,7 @@ func (h *TasksHandler) getTaskForSkill(c *gin.Context) {
 		"task": gin.H{
 			"uuid": taskUUID, "source_type": sourceType, "title": title, "description": description,
 			"status": taskSkillPublicStatus(status), "execution_mode": executionMode, "execution_tool": executionTool,
-			"work_dirs": workDirs, "created_at": createdAt, "updated_at": updatedAt,
+			"work_dirs": workDirs, "created_at": createdAt, "updated_at": updatedAt, "execution_index": executionIndex,
 		},
 		"history": history, "allowed_statuses": []string{"pending", "in_progress", "blocked", "done"},
 	})
@@ -142,9 +144,10 @@ func (h *TasksHandler) getCodexContext(c *gin.Context) {
 		return
 	}
 	var legacyWorkDir, executionMode, executionTool, sessionJSON string
+	var executionIndex int
 	err := h.taskDB().QueryRowContext(c.Request.Context(), `SELECT work_dir, execution_mode, execution_tool,
-		vibe_coding_session_json FROM gt_tasks WHERE uuid=?`, taskUUID).
-		Scan(&legacyWorkDir, &executionMode, &executionTool, &sessionJSON)
+		vibe_coding_session_json, execution_index FROM gt_tasks WHERE uuid=?`, taskUUID).
+		Scan(&legacyWorkDir, &executionMode, &executionTool, &sessionJSON, &executionIndex)
 	if err == sql.ErrNoRows {
 		i18n.Error(c, http.StatusNotFound, "localserver_task_not_found", "task_not_found")
 		return
@@ -178,6 +181,7 @@ func (h *TasksHandler) getCodexContext(c *gin.Context) {
 	linkPath := encodeMarkdownLocalPath(skillPath)
 	prompt := i18n.Format(c, "localserver_codex_task_prompt", i18n.Params{
 		"SkillPath": linkPath, "TaskUUID": taskUUID, "Tool": executionTool,
+		"ExecutionIndex": executionIndex,
 	})
 	response := gin.H{
 		"task_uuid": taskUUID, "work_dir": workDirs[0], "prompt": prompt,
@@ -202,7 +206,10 @@ func (h *TasksHandler) updateVibeCodingSessionFromSkill(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var body vibeCodingSession
+	var body struct {
+		vibeCodingSession
+		ExecutionIndex *int `json:"execution_index"`
+	}
 	if !decodeTaskSkillJSON(c, &body) {
 		return
 	}
@@ -220,23 +227,24 @@ func (h *TasksHandler) updateVibeCodingSessionFromSkill(c *gin.Context) {
 		}
 		defer lease.Close()
 	}
-	if !guardRemoteExecutionMutation(c, h.taskDB(), taskUUID) {
-		return
-	}
-
 	tx, err := h.taskDB().BeginTx(c.Request.Context(), nil)
 	if err != nil {
 		i18n.LocalServerError(c, http.StatusInternalServerError, err)
 		return
 	}
 	defer tx.Rollback()
-	var executionMode, executionTool string
-	if err = tx.QueryRowContext(c.Request.Context(), `SELECT execution_mode, execution_tool FROM gt_tasks WHERE uuid=?`, taskUUID).
-		Scan(&executionMode, &executionTool); err == sql.ErrNoRows {
+	var executionMode, executionTool, boundJSON string
+	var executionIndex int
+	if err = tx.QueryRowContext(c.Request.Context(), `SELECT execution_mode, execution_tool, vibe_coding_session_json, execution_index FROM gt_tasks WHERE uuid=?`, taskUUID).
+		Scan(&executionMode, &executionTool, &boundJSON, &executionIndex); err == sql.ErrNoRows {
 		i18n.Error(c, http.StatusNotFound, "localserver_task_not_found", "task_not_found")
 		return
 	} else if err != nil {
 		i18n.LocalServerError(c, http.StatusInternalServerError, err)
+		return
+	}
+	if body.ExecutionIndex == nil || *body.ExecutionIndex != executionIndex {
+		i18n.Error(c, http.StatusConflict, "localserver_vibe_session_stale", "vibe_session_stale")
 		return
 	}
 	if executionMode != taskruntime.ExecutionModeVibeCoding {
@@ -257,7 +265,24 @@ func (h *TasksHandler) updateVibeCodingSessionFromSkill(c *gin.Context) {
 		return
 	}
 	body.ThreadID = normalizedThreadID
-	sessionJSON, err := json.Marshal(body)
+	if bound, ok := validVibeCodingSession(boundJSON, body.Type); ok && bound.ThreadID != body.ThreadID {
+		i18n.Error(c, http.StatusConflict, "localserver_vibe_session_stale", "vibe_session_stale")
+		return
+	}
+	// Remote dispatch may resume this exact binding. Its handshake is
+	// idempotent; only a new binding must wait for remote execution to settle.
+	if _, bound := validVibeCodingSession(boundJSON, body.Type); !bound {
+		status, err := remoteExecutionBlock(c.Request.Context(), tx, taskUUID)
+		if err != nil {
+			i18n.LocalServerError(c, http.StatusInternalServerError, err)
+			return
+		}
+		if status != "" {
+			i18n.Error(c, http.StatusConflict, "localserver_active_sessions", "task_has_active_sessions")
+			return
+		}
+	}
+	sessionJSON, err := json.Marshal(body.vibeCodingSession)
 	if err != nil {
 		i18n.LocalServerError(c, http.StatusInternalServerError, err)
 		return
@@ -379,8 +404,19 @@ func (h *TasksHandler) updateTaskStatusFromSkill(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if orchestrator := h.orchestrator(); orchestrator != nil {
+		lease, err := orchestrator.BeginTaskExecutionSwitch(taskUUID)
+		if err != nil {
+			i18n.LocalServerError(c, http.StatusConflict, err)
+			return
+		}
+		defer lease.Close()
+	}
 	var body struct {
-		Status string `json:"status"`
+		Status         string `json:"status"`
+		ExecutionIndex *int   `json:"execution_index"`
+		Tool           string `json:"tool"`
+		ThreadID       string `json:"thread_id"`
 	}
 	if !decodeTaskSkillJSON(c, &body) {
 		return
@@ -391,9 +427,10 @@ func (h *TasksHandler) updateTaskStatusFromSkill(c *gin.Context) {
 		i18n.Error(c, http.StatusBadRequest, "localserver_skill_status_invalid", "skill_status_invalid")
 		return
 	}
-	var executionMode, executionTool string
-	err := h.taskDB().QueryRowContext(c.Request.Context(), `SELECT execution_mode, execution_tool FROM gt_tasks WHERE uuid=?`, taskUUID).
-		Scan(&executionMode, &executionTool)
+	var executionMode, executionTool, boundJSON string
+	var executionIndex int
+	err := h.taskDB().QueryRowContext(c.Request.Context(), `SELECT execution_mode, execution_tool, vibe_coding_session_json, execution_index FROM gt_tasks WHERE uuid=?`, taskUUID).
+		Scan(&executionMode, &executionTool, &boundJSON, &executionIndex)
 	if err == sql.ErrNoRows {
 		i18n.Error(c, http.StatusNotFound, "localserver_task_not_found", "task_not_found")
 		return
@@ -402,13 +439,20 @@ func (h *TasksHandler) updateTaskStatusFromSkill(c *gin.Context) {
 		i18n.LocalServerError(c, http.StatusInternalServerError, err)
 		return
 	}
+	if body.ExecutionIndex == nil || *body.ExecutionIndex != executionIndex {
+		i18n.Error(c, http.StatusConflict, "localserver_vibe_session_stale", "vibe_session_stale")
+		return
+	}
 	if !isVibeCodingTask(executionMode, executionTool) {
 		i18n.Error(c, http.StatusConflict, "localserver_task_not_codex", "task_not_codex")
 		return
 	}
+	if !requireBoundSkillSession(c, boundJSON, executionTool, body.Tool, body.ThreadID) {
+		return
+	}
 	now := time.Now().UnixMilli()
 	result, err := h.taskDB().ExecContext(c.Request.Context(), `UPDATE gt_tasks SET status=?, updated_at=?
-		WHERE uuid=? AND execution_mode=? AND execution_tool=?`, storedStatus, now, taskUUID, executionMode, executionTool)
+		WHERE uuid=? AND execution_mode=? AND execution_tool=? AND vibe_coding_session_json=?`, storedStatus, now, taskUUID, executionMode, executionTool, boundJSON)
 	if err != nil {
 		i18n.LocalServerError(c, http.StatusInternalServerError, err)
 		return
@@ -445,11 +489,21 @@ func (h *TasksHandler) createSkillActivity(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if orchestrator := h.orchestrator(); orchestrator != nil {
+		lease, err := orchestrator.BeginTaskExecutionSwitch(taskUUID)
+		if err != nil {
+			i18n.LocalServerError(c, http.StatusConflict, err)
+			return
+		}
+		defer lease.Close()
+	}
 	var body struct {
-		Type     string `json:"type"`
-		Content  string `json:"content"`
-		Tool     string `json:"tool"`
-		ThreadID string `json:"thread_id"`
+		ExecutionIndex *int   `json:"execution_index"`
+		EventID        string `json:"event_id"`
+		Type           string `json:"type"`
+		Content        string `json:"content"`
+		Tool           string `json:"tool"`
+		ThreadID       string `json:"thread_id"`
 	}
 	if !decodeTaskSkillJSON(c, &body) {
 		return
@@ -472,6 +526,14 @@ func (h *TasksHandler) createSkillActivity(c *gin.Context) {
 	}
 	now := time.Now().UnixMilli()
 	progressUUID := uuid.NewString()
+	if body.EventID != "" {
+		id, err := uuid.Parse(body.EventID)
+		if err != nil {
+			i18n.Error(c, http.StatusBadRequest, "localserver_skill_event_id_invalid", "skill_event_id_invalid")
+			return
+		}
+		progressUUID = id.String()
+	}
 	recordType, prompt, result := "initial_run", "", body.Content
 	activityActor, activityKind := activityActorTool, activityKindFinalResponse
 	if body.Type == "question" {
@@ -484,13 +546,18 @@ func (h *TasksHandler) createSkillActivity(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
-	var executionMode, executionTool string
-	if err := tx.QueryRowContext(c.Request.Context(), `SELECT execution_mode, execution_tool FROM gt_tasks WHERE uuid=?`, taskUUID).
-		Scan(&executionMode, &executionTool); err == sql.ErrNoRows {
+	var executionMode, executionTool, boundJSON string
+	var executionIndex int
+	if err := tx.QueryRowContext(c.Request.Context(), `SELECT execution_mode, execution_tool, vibe_coding_session_json, execution_index FROM gt_tasks WHERE uuid=?`, taskUUID).
+		Scan(&executionMode, &executionTool, &boundJSON, &executionIndex); err == sql.ErrNoRows {
 		i18n.Error(c, http.StatusNotFound, "localserver_task_not_found", "task_not_found")
 		return
 	} else if err != nil {
 		i18n.LocalServerError(c, http.StatusInternalServerError, err)
+		return
+	}
+	if body.ExecutionIndex == nil || *body.ExecutionIndex != executionIndex {
+		i18n.Error(c, http.StatusConflict, "localserver_vibe_session_stale", "vibe_session_stale")
 		return
 	}
 	if !isVibeCodingTask(executionMode, executionTool) {
@@ -512,6 +579,24 @@ func (h *TasksHandler) createSkillActivity(c *gin.Context) {
 			i18n.Error(c, http.StatusBadRequest, "localserver_skill_thread_id_invalid", "skill_thread_id_invalid")
 			return
 		}
+	}
+	if !requireBoundSkillSession(c, boundJSON, executionTool, body.Tool, body.ThreadID) {
+		return
+	}
+	var existingTask, existingTool, existingThread, existingPrompt, existingResult string
+	err = tx.QueryRowContext(c.Request.Context(), `SELECT task_uuid, cli_type, external_session_id, user_prompt, final_result
+		FROM gt_task_progress WHERE uuid=?`, progressUUID).Scan(&existingTask, &existingTool, &existingThread, &existingPrompt, &existingResult)
+	if err == nil {
+		if existingTask != taskUUID || existingTool != body.Tool || existingThread != body.ThreadID || existingPrompt != prompt || existingResult != result {
+			i18n.Error(c, http.StatusConflict, "localserver_skill_event_conflict", "skill_event_conflict")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"uuid": progressUUID, "duplicate": true})
+		return
+	}
+	if err != sql.ErrNoRows {
+		i18n.LocalServerError(c, http.StatusInternalServerError, err)
+		return
 	}
 	if _, err := tx.ExecContext(c.Request.Context(), `INSERT INTO gt_task_progress
 		(uuid, task_uuid, task_pipeline_snapshot_uuid, task_step_uuid, session_uuid, record_type, user_prompt,
@@ -623,7 +708,12 @@ func decodeTaskSkillJSON(c *gin.Context, target interface{}) bool {
 		return false
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxTaskSkillBodyBytes)
-	decoder := json.NewDecoder(c.Request.Body)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil || !utf8.Valid(raw) {
+		i18n.Error(c, http.StatusBadRequest, "localserver_json_utf8_required", "json_utf8_required")
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		i18n.Error(c, http.StatusBadRequest, "localserver_json_invalid", "json_invalid")
@@ -631,6 +721,16 @@ func decodeTaskSkillJSON(c *gin.Context, target interface{}) bool {
 	}
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		i18n.Error(c, http.StatusBadRequest, "localserver_json_single_object_required", "json_single_object_required")
+		return false
+	}
+	return true
+}
+
+func requireBoundSkillSession(c *gin.Context, raw, expectedTool, tool, threadID string) bool {
+	bound, ok := validVibeCodingSession(raw, expectedTool)
+	normalized, valid := normalizeVibeThreadID(expectedTool, threadID)
+	if !ok || !valid || strings.ToLower(strings.TrimSpace(tool)) != expectedTool || normalized != bound.ThreadID {
+		i18n.Error(c, http.StatusConflict, "localserver_vibe_session_stale", "vibe_session_stale")
 		return false
 	}
 	return true

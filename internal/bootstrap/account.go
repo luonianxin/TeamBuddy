@@ -16,11 +16,12 @@ import (
 
 // AccountSession contains only the optional cloud-login lifetime state.
 type AccountSession struct {
-	AdminID   string
-	UserID    string
-	UserName  string
-	DeviceMgr *identity.DeviceManager
-	JWTMgr    *localauth.JWTManager
+	AdminID     string
+	UserID      string
+	UserName    string
+	DisplayName string
+	DeviceMgr   *identity.DeviceManager
+	JWTMgr      *localauth.JWTManager
 	// CloudClient The actual cloud client used in this session: the official login is the default client,
 	// Custom address login is an independent client built based on domain name.
 	// The HTTP proxy layer (task/work item, etc.) must use it to avoid sending the JWT of the custom cloud to the official cloud.
@@ -29,12 +30,14 @@ type AccountSession struct {
 	// 隔离恢复；custom 登录地址由用户主动选择，不受当前配置约束。
 	ServerURL string
 	// ServerType 登录类型（official/custom），随会话保存，登出时用于决定是否清理 custom 登录索引。
-	ServerType string
-	cancelFunc context.CancelFunc
+	ServerType  string
+	cancelFunc  context.CancelFunc
+	credentials *secrets.SessionStore
 }
 
 // AccountManager manages the life cycle of account sessions
 type AccountManager struct {
+	transitionMu    sync.Mutex
 	mu              sync.RWMutex
 	current         *AccountSession
 	cloudClient     *cloud.Client
@@ -112,13 +115,15 @@ func (m *AccountManager) IsLoggedIn() bool {
 //
 // opts supports custom cloud address login: use an independent CloudClient to request the address.
 // Local databases and task execution are application-scoped and never change here.
-func (m *AccountManager) Login(ctx context.Context, adminID, userID, userName, token string, opts localserver.LoginOptions) (*AccountSession, error) {
+func (m *AccountManager) Login(ctx context.Context, adminID, userID, userName, displayName, token string, opts localserver.LoginOptions) (*AccountSession, error) {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
 	// Always rebuild the account session when logging in explicitly or resuming login, ensuring the latest JWT and device credentials are used.
 	m.mu.RLock()
 	hasCurrent := m.current != nil
 	m.mu.RUnlock()
 	if hasCurrent {
-		m.Logout()
+		m.logout()
 	}
 
 	// Select the cloud client. Local task storage is application-scoped and is
@@ -159,6 +164,18 @@ func (m *AccountManager) Login(ctx context.Context, adminID, userID, userName, t
 			return nil, fmt.Errorf("云端登录态已失效，请重新登录")
 		}
 		token = refreshed.Token
+		if refreshed.AdminID != "" {
+			adminID = refreshed.AdminID
+		}
+		if refreshed.User.ID != "" {
+			userID = refreshed.User.ID
+		}
+		if refreshed.User.Username != "" {
+			userName = refreshed.User.Username
+		}
+		if refreshed.User.DisplayName != "" {
+			displayName = refreshed.User.DisplayName
+		}
 	}
 	if err := m.secretStore.Set(secrets.KeyJWT, token); err != nil {
 		return nil, fmt.Errorf("保存 JWT 失败: %w", err)
@@ -167,25 +184,29 @@ func (m *AccountManager) Login(ctx context.Context, adminID, userID, userName, t
 	db := m.localRuntime.DB
 
 	//Initialize JWT manager
-	jwtMgr := localauth.NewJWTManager(m.secretStore)
+	credentials := secrets.NewSessionStore(m.secretStore, token)
+	jwtMgr := localauth.NewJWTManager(credentials)
 
 	//Initialize device manager
-	deviceMgr := identity.NewDeviceManager(m.configDir, db, m.secretStore)
+	deviceMgr := identity.NewDeviceManager(m.configDir, db, credentials)
 
 	//The account session must be independent of this HTTP login request.
 	// Gin will cancel the request context after the request returns; long-term tasks are only explicitly canceled by Logout/application exit.
 	sessionCtx, cancel := context.WithCancel(context.Background())
+	cloudClient = cloudClient.ForAccount(sessionCtx, credentials, userID)
 
 	session := &AccountSession{
 		AdminID:     adminID,
 		UserID:      userID,
 		UserName:    userName,
+		DisplayName: displayName,
 		DeviceMgr:   deviceMgr,
 		JWTMgr:      jwtMgr,
 		CloudClient: cloudClient,
 		ServerURL:   opts.ServerURL,
 		ServerType:  opts.ServerType,
 		cancelFunc:  cancel,
+		credentials: credentials,
 	}
 
 	//Re-register the same device UUID every time a cloud account session is created.
@@ -203,7 +224,7 @@ func (m *AccountManager) Login(ctx context.Context, adminID, userID, userName, t
 	}
 
 	// The cloud token is a standard JWT, which is automatically refreshed before expiration driven by exp.
-	if token, tokenErr := m.secretStore.Get(secrets.KeyJWT); tokenErr == nil {
+	if token, tokenErr := credentials.Get(secrets.KeyJWT); tokenErr == nil {
 		if claims, claimsErr := localauth.ParseClaims(token); claimsErr == nil && claims.Exp > 0 {
 			if saveErr := jwtMgr.SaveToken(token, "", claims.Exp); saveErr == nil {
 				jwtMgr.StartRefreshLoop(sessionCtx, cloudClient, func() {
@@ -217,11 +238,12 @@ func (m *AccountManager) Login(ctx context.Context, adminID, userID, userName, t
 	// Both official and custom logins are persistent: when the custom login is restored, rebuild the client according to the ServerURL and renew it to the cloud.
 	if opts.PersistLastLogin {
 		m.writeLastLogin(accountLastLogin{
-			AdminID:    adminID,
-			UserID:     userID,
-			UserName:   userName,
-			ServerType: opts.ServerType,
-			ServerURL:  opts.ServerURL,
+			AdminID:     adminID,
+			UserID:      userID,
+			UserName:    userName,
+			DisplayName: displayName,
+			ServerType:  opts.ServerType,
+			ServerURL:   opts.ServerURL,
 		})
 	}
 
@@ -233,8 +255,8 @@ func (m *AccountManager) Login(ctx context.Context, adminID, userID, userName, t
 }
 
 // LoginAndCreateSession Log in and create local service session information (implement localserver.AccountManagerInterface)
-func (m *AccountManager) LoginAndCreateSession(ctx context.Context, adminID, userID, userName, token string, opts localserver.LoginOptions) (*localserver.SessionInfo, error) {
-	session, err := m.Login(ctx, adminID, userID, userName, token, opts)
+func (m *AccountManager) LoginAndCreateSession(ctx context.Context, adminID, userID, userName, displayName, token string, opts localserver.LoginOptions) (*localserver.SessionInfo, error) {
+	session, err := m.Login(ctx, adminID, userID, userName, displayName, token, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +267,7 @@ func (m *AccountManager) LoginAndCreateSession(ctx context.Context, adminID, use
 		AdminID:     session.AdminID,
 		UserID:      session.UserID,
 		UserName:    session.UserName,
+		DisplayName: session.DisplayName,
 		ServerURL:   session.ServerURL,
 		ServerType:  opts.ServerType,
 	}, nil
@@ -254,6 +277,12 @@ func (m *AccountManager) LoginAndCreateSession(ctx context.Context, adminID, use
 // Called when the program exits: it keeps the last login index
 // so that the login state can be restored on the next startup.
 func (m *AccountManager) Close() {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	m.closeSession()
+}
+
+func (m *AccountManager) closeSession() {
 	m.mu.Lock()
 	session := m.current
 	m.current = nil
@@ -261,6 +290,11 @@ func (m *AccountManager) Close() {
 
 	if session == nil {
 		return
+	}
+
+	// Revoke writes before a subsequent login can replace shared persisted keys.
+	if session.credentials != nil {
+		session.credentials.Close()
 	}
 
 	// Stop JWT refresh
@@ -282,6 +316,12 @@ func (m *AccountManager) Close() {
 // storage to avoid automatic recovery on the next startup.
 // Only call it when the user actively logs out or switches accounts.
 func (m *AccountManager) Logout() {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	m.logout()
+}
+
+func (m *AccountManager) logout() {
 	m.mu.RLock()
 	serverURL := ""
 	serverType := ""
@@ -292,7 +332,7 @@ func (m *AccountManager) Logout() {
 	}
 	m.mu.RUnlock()
 
-	m.Close()
+	m.closeSession()
 
 	// Actively log out/switch accounts: clear the account index in the boot storage to avoid automatic recovery by mistake at next startup.
 	// 清除当前会话索引、custom 固定索引与官方索引，登出后重启不恢复任何会话；

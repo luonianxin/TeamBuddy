@@ -56,12 +56,14 @@ type PromptFileSpec struct {
 // prompt 的投递方式由调用方决定：StdinText 走标准输入，PromptFile 走临时文件，
 // 也可以直接拼进 Args，运行器不预设策略。
 type RunSpec struct {
-	ExecPath   string
-	Args       []string
-	WorkDir    string
-	EnvVars    map[string]string
-	StdinText  string // 非空时写入子进程 stdin；为空则不占用 stdin
-	PromptFile *PromptFileSpec
+	ExecPath       string
+	Args           []string
+	WorkDir        string
+	EnvVars        map[string]string
+	StdinText      string // 非空时写入子进程 stdin；为空则不占用 stdin
+	PromptFile     *PromptFileSpec
+	ExecPrefixArgs []string
+	Watchdog       WatchdogConfig
 }
 
 // RunResult 汇总一次进程执行的收尾信息。
@@ -92,9 +94,21 @@ type Process struct {
 	stdoutDone      chan struct{}
 	waitDone        chan struct{}
 	lastStdout      atomic.Int64
+	stderrBytes     atomic.Int64
 	watch           idleWatchState
+	wd              watchdog
+	wdCfg           WatchdogConfig
+	tree            procTree
+	activities      chan ExecutorEvent
+	rootExited      chan struct{}
+	rootOnce        sync.Once
+	stdout          io.Closer
+	stderr          io.Closer
 	stopMu          sync.Mutex
 	idleStopMessage string
+	stallKilled     bool
+	sawProtocol     bool
+	startedAt       time.Time
 }
 
 // StartProcess 启动 CLI 进程并开始按行读取 stdout。
@@ -102,7 +116,17 @@ type Process struct {
 func StartProcess(parent context.Context, spec RunSpec) (*Process, error) {
 	innerCtx, cancel := context.WithCancel(parent)
 
-	args := append([]string{}, spec.Args...)
+	args := append([]string{}, spec.ExecPrefixArgs...)
+	args = append(args, spec.Args...)
+	exePath, prefix, unwrapErr := unwrapCommand(spec.ExecPath, args)
+	if unwrapErr != nil {
+		cancel()
+		return nil, unwrapErr
+	}
+	if len(prefix) > 0 {
+		args = append(prefix, args...)
+	}
+	spec.ExecPath = exePath
 	promptPath := ""
 	if spec.PromptFile != nil {
 		path, err := writePromptFile(spec.PromptFile)
@@ -117,19 +141,22 @@ func StartProcess(parent context.Context, spec RunSpec) (*Process, error) {
 	}
 
 	cmd := exec.CommandContext(innerCtx, spec.ExecPath, args...)
-	CreateProcessGroup(cmd)
+	var tree atomic.Value
 	// 上下文取消也走进程树终止，不能只杀根进程留下编译器或包管理器。
-	cmd.Cancel = func() error { return TerminateProcessTree(cmd.Process.Pid) }
+	// tree 用 atomic：Start 内部就可能调用 Cancel，和 startInTree 的写入并发。
+	cmd.Cancel = func() error {
+		if value := tree.Load(); value != nil {
+			return value.(procTree).Terminate(5 * time.Second)
+		}
+		if cmd.Process != nil {
+			return TerminateProcessTree(cmd.Process.Pid)
+		}
+		return nil
+	}
 	if spec.WorkDir != "" {
 		cmd.Dir = spec.WorkDir
 	}
-	if len(spec.EnvVars) > 0 {
-		env := append([]string{}, os.Environ()...)
-		for key, value := range spec.EnvVars {
-			env = append(env, fmt.Sprintf("%s=%s", key, value))
-		}
-		cmd.Env = env
-	}
+	cmd.Env = mergeProcessEnv(spec.EnvVars, spec.WorkDir)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -155,11 +182,17 @@ func StartProcess(parent context.Context, spec RunSpec) (*Process, error) {
 		}
 	}
 
-	if err := cmd.Start(); err != nil {
+	cfg := spec.Watchdog.normalized()
+	if spec.Watchdog.Mode == "" && spec.Watchdog.StallAction == "" {
+		cfg = DefaultWatchdogConfig(false)
+	}
+	started, err := startInTree(cmd)
+	if err != nil {
 		cancel()
 		removePromptFile(promptPath)
 		return nil, err
 	}
+	tree.Store(started)
 
 	proc := &Process{
 		cmd:        cmd,
@@ -172,8 +205,17 @@ func StartProcess(parent context.Context, spec RunSpec) (*Process, error) {
 		waitDone:   make(chan struct{}),
 		stdinErr:   stdinErrCh,
 		promptPath: promptPath,
+		wd:         newWatchdog(cfg),
+		wdCfg:      cfg,
+		tree:       started,
+		activities: make(chan ExecutorEvent, 32),
+		rootExited: make(chan struct{}),
+		stdout:     stdout,
+		stderr:     stderr,
+		startedAt:  time.Now(),
 	}
 	proc.lastStdout.Store(time.Now().UnixMilli())
+	rememberLiveGroup(proc.pid, spec.ExecPath)
 
 	if stdin != nil {
 		prompt := spec.StdinText
@@ -197,10 +239,12 @@ func StartProcess(parent context.Context, spec RunSpec) (*Process, error) {
 		for {
 			n, err := stderr.Read(buf)
 			if n > 0 {
+				proc.stderrBytes.Add(int64(n))
 				proc.stderrTail.Append(buf[:n])
 			}
 			if err != nil {
-				if err != io.EOF {
+				// 主动关闭读端是为了摆脱脱离进程组的孙进程，不当成失败。
+				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
 					proc.stderrTail.AppendLine("读取 stderr 失败: " + err.Error())
 				}
 				return
@@ -221,6 +265,7 @@ func StartProcess(parent context.Context, spec RunSpec) (*Process, error) {
 		}
 	}()
 	go proc.watchStdoutIdle()
+	go proc.watchRootExit()
 
 	return proc, nil
 }
@@ -247,9 +292,22 @@ func (p *Process) ObserveEvent(event ExecutorEvent) {
 		return
 	}
 	now := time.Now()
+	if event.Type != EventStart && event.Type != EventActivity && event.Type != EventHeartbeat {
+		p.sawProtocol = true
+	}
 	if p.watch.observe(event, now) {
 		p.lastStdout.Store(now.UnixMilli())
 	}
+	p.wd.ObserveEvent(event, now)
+}
+
+// ObserveHeartbeat 把不展示的协议事件记成活动，不进入事件通道。
+func (p *Process) ObserveHeartbeat() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	p.sawProtocol = true
+	p.wd.ObserveHeartbeat(now)
 }
 
 func (p *Process) IdleStopped() bool { return p.IdleStopMessage() != "" }
@@ -262,6 +320,19 @@ func (p *Process) IdleStopMessage() string {
 }
 
 func (p *Process) watchStdoutIdle() {
+	mode := p.wdCfg.Mode
+	switch mode {
+	case WatchdogModeLegacy:
+		p.watchStdoutIdleLegacy()
+	case WatchdogModeShadow:
+		go p.watchStdoutIdleLegacy()
+		p.watchStdoutIdleNew(true)
+	default:
+		p.watchStdoutIdleNew(false)
+	}
+}
+
+func (p *Process) watchStdoutIdleLegacy() {
 	ticker := time.NewTicker(outputIdleCheckInterval)
 	defer ticker.Stop()
 	stopFailures := 0
@@ -286,6 +357,98 @@ func (p *Process) watchStdoutIdle() {
 				continue
 			}
 			if p.Stopped() {
+				return
+			}
+		}
+	}
+}
+
+func (p *Process) watchStdoutIdleNew(shadow bool) {
+	ticker := time.NewTicker(p.wdCfg.PollInterval)
+	defer ticker.Stop()
+	var stderrAt int64
+	var state string
+	for {
+		select {
+		case <-p.waitDone:
+			return
+		case <-ticker.C:
+			if p.Stopped() {
+				return
+			}
+			now := time.Now()
+			sample := ProcSample{Readable: false, IOBytes: -1}
+			if p.tree != nil {
+				if got, err := p.tree.Sample(); err == nil {
+					sample = got
+				}
+			}
+			stderrNow := p.stderrBytes.Load()
+			p.mu.Lock()
+			modelOpen := p.wd.modelOpen
+			p.mu.Unlock()
+			modelConn := ModelConnUnknown
+			if modelOpen && sample.Readable {
+				modelConn = remoteConnsOpen(sample.PIDs)
+			}
+			p.mu.Lock()
+			input := WatchInput{
+				Now:         now,
+				LastStdout:  time.UnixMilli(p.lastStdout.Load()),
+				Sample:      sample,
+				StderrGrew:  stderrNow > stderrAt,
+				Paused:      p.watch.paused(),
+				UserStop:    p.stopped,
+				SawProtocol: p.sawProtocol,
+				StartedAt:   p.startedAt,
+				ModelConn:   modelConn,
+			}
+			events, kill := p.wd.Tick(input)
+			nextState := p.wd.state
+			p.mu.Unlock()
+			stderrAt = stderrNow
+			if nextState != state {
+				applog.Info("[Executor] cli_watchdog_state", "pid", p.Pid(), "state", nextState, "shadow", shadow)
+				state = nextState
+			}
+			for _, event := range events {
+				p.pushActivity(event)
+			}
+			if !kill {
+				continue
+			}
+			if shadow {
+				applog.Info("[Executor] cli_watchdog_would_kill_total", "pid", p.Pid(), "old_reason", p.idleStopReason(now), "new_state", nextState)
+				continue
+			}
+			p.mu.Lock()
+			p.stallKilled = true
+			p.mu.Unlock()
+			if err := p.stopProcess(true); err != nil {
+				applog.Warn("[Executor] 卡死进程终止失败", "pid", p.Pid(), "error", err)
+			}
+			return
+		}
+	}
+}
+
+func (p *Process) pushActivity(event ExecutorEvent) {
+	select {
+	case p.activities <- event:
+	default:
+	}
+}
+
+func (p *Process) watchRootExit() {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.waitDone:
+			return
+		case <-ticker.C:
+			if rootGone(p.Pid()) {
+				p.rootOnce.Do(func() { close(p.rootExited) })
 				return
 			}
 		}
@@ -328,12 +491,22 @@ func hasDescendant(parents map[int]int, root int) bool {
 	if root <= 0 || len(parents) == 0 {
 		return false
 	}
+	children := map[int][]int{}
 	for pid, ppid := range parents {
-		if pid != root && ppid == root {
-			return true
-		}
+		children[ppid] = append(children[ppid], pid)
 	}
-	return false
+	stack := append([]int{}, children[root]...)
+	seen := map[int]bool{}
+	for len(stack) > 0 {
+		pid := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if pid == root || seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		stack = append(stack, children[pid]...)
+	}
+	return len(seen) > 0
 }
 
 // readStdoutLines 按 LF 读取 stdout，并一直读到 EOF。
@@ -403,7 +576,12 @@ func (p *Process) Stopped() bool {
 func (p *Process) Stop() error { return p.stopProcess(false) }
 
 func (p *Process) stopProcess(watchdog bool) error {
-	return p.stopUsing(watchdog, TerminateProcessTree)
+	return p.stopUsing(watchdog, func(pid int) error {
+		if p.tree != nil {
+			return p.tree.Terminate(p.wdCfg.TermGrace)
+		}
+		return TerminateProcessTree(pid)
+	})
 }
 
 func (p *Process) stopUsing(watchdog bool, terminate func(int) error) error {
@@ -420,8 +598,14 @@ func (p *Process) stopUsing(watchdog bool, terminate func(int) error) error {
 	reason := ""
 	if watchdog {
 		reason = p.idleStopReason(time.Now())
-		if reason == "" {
+		p.mu.Lock()
+		stalled := p.stallKilled
+		p.mu.Unlock()
+		if reason == "" && !stalled {
 			return nil
+		}
+		if stalled {
+			reason = "CLI 长时间无任何活动（进程树无 CPU/IO、无输出），已终止"
 		}
 	}
 	pid := p.Pid()
@@ -430,6 +614,9 @@ func (p *Process) stopUsing(watchdog bool, terminate func(int) error) error {
 	p.stopErr = err
 	if err == nil {
 		p.stopped = true
+		if watchdog && p.stallKilled {
+			reason = "CLI 长时间无任何活动（进程树无 CPU/IO、无输出），已终止"
+		}
 		p.idleStopMessage = reason
 	}
 	p.mu.Unlock()
@@ -443,7 +630,7 @@ func (p *Process) stopUsing(watchdog bool, terminate func(int) error) error {
 // 必须在 Lines 通道关闭（编码器已消费完输出）之后调用；可重复调用，只有第一次真正等待。
 func (p *Process) WaitFor() *RunResult {
 	p.waitOnce.Do(func() {
-		<-p.stderrDone
+		p.waitStderr()
 
 		waitErr := p.cmd.Wait()
 		stdinErr := <-p.stdinErr
@@ -453,6 +640,12 @@ func (p *Process) WaitFor() *RunResult {
 		p.mu.Unlock()
 
 		removePromptFile(p.promptPath)
+		if p.GroupEmpty() {
+			forgetLiveGroup(p.pid)
+		}
+		if p.tree != nil {
+			_ = p.tree.Close()
+		}
 
 		// 与停止请求同步，确保终止原因先于最终事件可见。
 		p.stopMu.Lock()
@@ -498,6 +691,159 @@ func removePromptFile(path string) {
 		return
 	}
 	_ = os.Remove(path)
+}
+
+// Activities 返回看门狗发出的活动事件。
+func (p *Process) Activities() <-chan ExecutorEvent { return p.activities }
+
+// RootExited 在根进程退出后关闭。
+func (p *Process) RootExited() <-chan struct{} { return p.rootExited }
+
+// DrainAfter 是根进程退出后的输出等待预算，不包含消费事件所用时间。
+func (p *Process) DrainAfter() time.Duration {
+	if p.wdCfg.DrainAfterExit <= 0 {
+		return 5 * time.Second
+	}
+	return p.wdCfg.DrainAfterExit
+}
+
+// CloseStdout 关闭 stdout 读端，避免孙进程继承管道导致读取永不结束。
+func (p *Process) CloseStdout() {
+	if p.stdout != nil {
+		_ = p.stdout.Close()
+	}
+}
+
+// drainStdout preserves buffered protocol output after process-tree cleanup.
+// Escaped writers are bounded by bytes and cumulative waiting time; consuming
+// an event may involve slow storage, so its duration is excluded from that budget.
+func (p *Process) drainStdout(ctx context.Context, consume func(string)) bool {
+	const maxDrainBytes = 256 << 20
+	remaining := p.DrainAfter()
+	bytes := 0
+	complete := true
+	for {
+		if remaining <= 0 || bytes >= maxDrainBytes || ctx.Err() != nil {
+			complete = false
+			break
+		}
+		started := time.Now()
+		timer := time.NewTimer(remaining)
+		select {
+		case line, ok := <-p.lines:
+			timer.Stop()
+			remaining -= time.Since(started)
+			if !ok {
+				return true
+			}
+			bytes += len(line)
+			consume(line)
+		case <-timer.C:
+			complete = false
+		case <-ctx.Done():
+			timer.Stop()
+			complete = false
+		}
+		if !complete {
+			break
+		}
+	}
+	p.CloseStdout()
+	// The reader may already be waiting to enqueue a line. Drain that finite
+	// remainder to avoid leaking it, even when an escaped writer was truncated.
+	for line := range p.lines {
+		consume(line)
+	}
+	return complete
+}
+
+// CloseStderr 关闭 stderr 读端。setsid 脱离进程组的孙进程杀不到时，否则 WaitFor 会一直等 EOF。
+func (p *Process) CloseStderr() {
+	if p.stderr != nil {
+		_ = p.stderr.Close()
+	}
+}
+
+// waitStderr 先等 stderr 自然结束。超过排空时间仍不结束就关掉读端，避免永久卡住。
+func (p *Process) waitStderr() {
+	timer := time.NewTimer(p.DrainAfter())
+	defer timer.Stop()
+	select {
+	case <-p.stderrDone:
+	case <-timer.C:
+		p.CloseStderr()
+		<-p.stderrDone
+	}
+}
+
+// ReapGroup 回收本轮进程组里残留的后代。
+func (p *Process) ReapGroup(grace time.Duration) error {
+	if p.tree == nil {
+		return TerminateProcessTree(p.Pid())
+	}
+	err := p.tree.Terminate(grace)
+	if p.tree.Empty() {
+		applog.Info("[Executor] cli_orphan_reaped_total", "pid", p.Pid())
+	} else if err == nil {
+		err = fmt.Errorf("process tree %d is still alive after cleanup", p.Pid())
+	}
+	return err
+}
+
+// GroupEmpty is conservative when process-tree inspection fails.
+func (p *Process) GroupEmpty() bool {
+	if p.tree != nil {
+		return p.tree.Empty()
+	}
+	return !pidAlive(p.Pid())
+}
+
+// StallKilled 报告新看门狗是否因卡死终止了进程。
+func (p *Process) StallKilled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stallKilled
+}
+
+// UserStopped 报告用户停止。看门狗终止不算。
+func (p *Process) UserStopped() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stopped && !p.stallKilled && p.idleStopMessage == ""
+}
+
+// SawProtocol 报告是否已经收到过协议事件。
+func (p *Process) SawProtocol() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sawProtocol
+}
+
+func mergeProcessEnv(extra map[string]string, workDir string) []string {
+	env := os.Environ()
+	if len(extra) == 0 && workDir == "" {
+		return nil
+	}
+	if workDir != "" {
+		filtered := env[:0:0]
+		for _, item := range env {
+			if strings.HasPrefix(item, "PWD=") {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		env = filtered
+	}
+	for key, value := range extra {
+		if workDir != "" && key == "PWD" {
+			continue
+		}
+		env = append(env, key+"="+value)
+	}
+	if workDir != "" {
+		env = append(env, "PWD="+workDir)
+	}
+	return env
 }
 
 // exitCodeOf 从等待错误中解析退出码，无法解析时返回 -1。

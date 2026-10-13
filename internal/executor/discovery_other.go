@@ -1,6 +1,10 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package executor
+
+import "context"
+
+func refreshDiscoveryPath(context.Context) {}
 
 // persistedPathDirs returns directories persisted in the environment PATH
 // outside the current process. On non-Windows platforms the process inherits

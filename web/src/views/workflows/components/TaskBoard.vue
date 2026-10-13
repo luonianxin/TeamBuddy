@@ -48,7 +48,7 @@
                 class="empty-icon"
                 aria-hidden="true"
               />
-              <span class="empty-text">{{ t('common.states.noData') }}</span>
+              <span class="empty-text">{{ props.searchKeyword.trim() ? t('workflows.board.noMatchingTasks') : t('common.states.noData') }}</span>
             </div>
           </div>
         </section>
@@ -57,12 +57,20 @@
 
     <TaskListView
       v-else
+      v-model:status-filter="statusFilter"
       :rows="listRows"
       :filters="listFilters"
-      :loading="loading"
+      :filters-ready="lanesLoaded"
+      :search-keyword="props.searchKeyword"
+      :loading="loading || listLoading"
+      :status-counts="listStatusCounts"
+      :total="listTotal"
+      :page="listPage"
+      :page-size="LIST_PAGE_SIZE"
       row-clickable
       @action="handleListAction"
       @row-click="handleListRowClick"
+      @page-change="changeListPage"
     />
 
     <TaskBoardSettingsModal
@@ -139,7 +147,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import apiClient from '@/api/client'
@@ -155,6 +163,7 @@ import type {
   BoardListRow,
   TaskBoardLane,
   TaskBoardTask,
+  TaskBoardListResponse,
   TaskLatestActivity,
   TaskViewMode,
 } from '@/types/task-board'
@@ -168,10 +177,13 @@ import { useAppI18n } from '@/i18n'
 import { useLocalWS } from '@/composables/useLocalWebSocket'
 
 const { t } = useAppI18n()
+const statusFilter = defineModel<string>('statusFilter', { default: 'active' })
 const props = withDefaults(defineProps<{
   viewMode?: BoardLayoutMode
+  searchKeyword?: string
 }>(), {
   viewMode: 'board',
+  searchKeyword: '',
 })
 const { executionName, executionAvatar } = useTaskExecutionDisplay()
 
@@ -192,8 +204,19 @@ function readTaskViewMode(): TaskViewMode {
 const router = useRouter()
 const loading = ref(false)
 const tasks = ref<TaskBoardTask[]>([])
+const LIST_PAGE_SIZE = 20
+const listTasks = ref<TaskBoardTask[]>([])
+const listStatusCounts = ref<Record<string, number>>({})
+const listTotal = ref(0)
+const listPage = ref(1)
+const listLoading = ref(false)
+let listRequestVersion = 0
+let listSearchTimer: ReturnType<typeof setTimeout> | undefined
+let boardSearchTimer: ReturnType<typeof setTimeout> | undefined
+let disposed = false
 const updating = ref<string>()
 const allLanes = ref<TaskBoardLane[]>([])
+const lanesLoaded = ref(false)
 const taskViewMode = ref<TaskViewMode>(readTaskViewMode())
 const selectedTaskUuid = ref('')
 const taskDrawerOpen = ref(false)
@@ -223,7 +246,7 @@ const listFilters = computed<BoardListFilter[]>(() => {
 
 const listRows = computed<BoardListRow[]>(() => {
   const laneByKey = new Map(visibleLanes.value.map((lane) => [lane.lane_key, lane]))
-  return tasks.value.flatMap((task) => {
+  return listTasks.value.flatMap((task) => {
     const lane = laneByKey.get(taskLaneKey(task.status))
     if (!lane) return []
     const needsConfiguration = !task.execution_mode
@@ -255,6 +278,88 @@ const grouped = computed(() => Object.fromEntries(
     tasks.value.filter((task) => taskLaneKey(task.status) === lane.lane_key),
   ]),
 ))
+
+watch([() => props.viewMode, () => props.searchKeyword.trim()], (values, previous) => {
+  clearTimeout(boardSearchTimer)
+  loadRequestVersion++
+  if (props.viewMode !== 'board') {
+    loading.value = false
+    return
+  }
+  loading.value = true
+  boardSearchTimer = setTimeout(() => { void load() }, values[1] !== previous?.[1] ? 250 : 0)
+})
+
+watch(
+  [() => props.viewMode, () => props.searchKeyword.trim(), statusFilter, () => visibleLanes.value.map((lane) => lane.lane_key).join(',')],
+  (values, previous) => {
+    listPage.value = 1
+    scheduleListLoad(values[1] !== previous?.[1] ? 250 : 0)
+  },
+)
+
+function changeListPage(page: number) {
+  listPage.value = page
+  scheduleListLoad(0)
+}
+
+function scheduleListLoad(delay: number) {
+  if (disposed) return
+  clearTimeout(listSearchTimer)
+  listRequestVersion++
+  if (props.viewMode !== 'list') {
+    listLoading.value = false
+    return
+  }
+  listLoading.value = true
+  listSearchTimer = setTimeout(() => { void loadList() }, delay)
+}
+
+async function loadList() {
+  clearTimeout(listSearchTimer)
+  const version = ++listRequestVersion
+  const revisionSnapshot = new Map([...realtimeActivities].map(([key, entry]) => [key, entry.revision]))
+  listLoading.value = true
+  try {
+    const response = await apiClient.get<TaskBoardListResponse>('/tasks', {
+      source_type: 'local',
+      list_view: true,
+      keyword: props.searchKeyword.trim(),
+      status: statusFilter.value === 'all' ? undefined : statusFilter.value,
+      page: listPage.value,
+      page_size: LIST_PAGE_SIZE,
+    })
+    if (version !== listRequestVersion) return
+    const lastPage = Math.max(1, Math.ceil(response.total / LIST_PAGE_SIZE))
+    if (listPage.value > lastPage) {
+      changeListPage(lastPage)
+      return
+    }
+    for (const task of response.items) {
+      const realtime = realtimeActivities.get(task.uuid)
+      if (realtime && realtime.revision > (revisionSnapshot.get(task.uuid) || 0)) {
+        task.latest_activity = latestActivity(task.latest_activity, realtime.activity)
+      }
+    }
+    listTasks.value = response.items
+    listStatusCounts.value = response.status_counts
+    listTotal.value = response.total
+  } catch (error) {
+    if (version === listRequestVersion) {
+      message.error(error instanceof Error ? error.message : t('workflows.board.loadFailed'))
+    }
+  } finally {
+    if (version === listRequestVersion) listLoading.value = false
+  }
+}
+
+onUnmounted(() => {
+  disposed = true
+  clearTimeout(listSearchTimer)
+  clearTimeout(boardSearchTimer)
+  listRequestVersion++
+  loadRequestVersion++
+})
 
 interface RealtimeActivityEntry {
   activity: TaskLatestActivity
@@ -342,23 +447,42 @@ useLocalWS('executor.activity', (data: {
 
   const task = tasks.value.find((item) => item.uuid === taskUuid)
   if (task) task.latest_activity = latestActivity(task.latest_activity, activity)
+  const listTask = listTasks.value.find((item) => item.uuid === taskUuid)
+  if (listTask) listTask.latest_activity = latestActivity(listTask.latest_activity, activity)
 })
 
 async function load() {
+  if (disposed) return
+  clearTimeout(boardSearchTimer)
+  if (props.viewMode === 'list') scheduleListLoad(0)
   const requestVersion = ++loadRequestVersion
+  const keyword = props.viewMode === 'board' ? props.searchKeyword.trim() : ''
   const revisionSnapshot = new Map(
     [...realtimeActivities].map(([taskUuid, entry]) => [taskUuid, entry.revision]),
   )
   loading.value = true
   try {
     const [taskResponse, laneResponse] = await Promise.all([
-      apiClient.get<{ items: TaskBoardTask[] }>('/tasks', { page_size: 100, source_type: 'local' }),
+      apiClient.get<TaskBoardListResponse>('/tasks', { page_size: 100, source_type: 'local', keyword }),
       apiClient.get<{ items: TaskBoardLane[] }>('/tasks/task-lanes'),
     ])
     if (requestVersion !== loadRequestVersion) return
 
+    // 搜索覆盖全部匹配任务；空关键词保留看板原有的前 100 条展示范围。
+    const matchedTasks = [...(taskResponse.items || [])]
+    const pageCount = keyword ? Math.ceil(taskResponse.total / 100) : 1
+    for (let page = 2; page <= pageCount; page++) {
+      if (requestVersion !== loadRequestVersion) return
+      const response = await apiClient.get<TaskBoardListResponse>('/tasks', {
+        page, page_size: 100, source_type: 'local', keyword,
+      })
+      if (requestVersion !== loadRequestVersion) return
+      if (!response.items.length) break
+      matchedTasks.push(...response.items)
+    }
+
     // 团队工作配置后生成的任务带 work_item_id。本地任务页只保留本地新建的任务。
-    const loadedTasks = (taskResponse.items || []).filter((task) => !String(task.work_item_id || '').trim())
+    const loadedTasks = matchedTasks.filter((task) => !String(task.work_item_id || '').trim())
     for (const task of loadedTasks) {
       const realtime = realtimeActivities.get(task.uuid)
       if (realtime && realtime.revision > (revisionSnapshot.get(task.uuid) || 0)) {
@@ -367,9 +491,10 @@ async function load() {
     }
     tasks.value = loadedTasks
     allLanes.value = laneResponse.items || []
+    lanesLoaded.value = true
     const loadedTaskUuids = new Set(loadedTasks.map((task) => task.uuid))
     for (const taskUuid of realtimeActivities.keys()) {
-      if (!loadedTaskUuids.has(taskUuid)) realtimeActivities.delete(taskUuid)
+      if (!loadedTaskUuids.has(taskUuid) && !listTasks.value.some((task) => task.uuid === taskUuid)) realtimeActivities.delete(taskUuid)
     }
   } catch (error) {
     if (requestVersion === loadRequestVersion) {
@@ -494,7 +619,7 @@ function openTask(taskUuid: string) {
 function handleListAction(row: BoardListRow, action: BoardListActionKind) {
   if (!row.taskUuid) return
   if (action === 'configure') {
-    const task = tasks.value.find((item) => item.uuid === row.taskUuid)
+    const task = listTasks.value.find((item) => item.uuid === row.taskUuid)
     if (!task) return
     pendingAssignTask.value = task
     assignModalOpen.value = true

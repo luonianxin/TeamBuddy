@@ -60,7 +60,10 @@ func (m *DeviceManager) GetOrCreateUUID() (string, error) {
 
 // IsRegistered checks whether the device has been registered
 func (m *DeviceManager) IsRegistered() bool {
-	if m.db == nil {
+	if m.db == nil || m.secretStore == nil {
+		return false
+	}
+	if credential, err := m.secretStore.Get(secrets.KeyDeviceCredential); err != nil || credential == "" {
 		return false
 	}
 	var count int

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,132 +17,52 @@ import (
 	"goteams-client/internal/cloud"
 )
 
-// cursorTTL is the in-memory incremental cursor lifetime: after this idle window a
-// task's next push falls back to a full payload (the cloud upsert is idempotent).
-const cursorTTL = 24 * time.Hour
+// Pusher serializes capture and delivery for each task. Snapshots, revisions and
+// retry state live in SQLite; restarting the app never loses a pending upload.
+type Pusher struct{ locks [32]chan struct{} }
 
-// Pusher aggregates local task execution results and pushes them incrementally to
-// the cloud via REST. It replaces the removed WebSocket sync channel: each push
-// carries the full step list and task-level counters; conversation content travels
-// through the separate step-level session sync service.
-type Pusher struct {
-	mu     sync.Mutex
-	cursor map[string]pushCursor // taskUUID → last pushed conversation watermark
-}
-
-type pushCursor struct {
-	lastCreatedAt int64 // ms watermark of the last pushed conversation summary
-	lastRevision  int64 // last cloud-accepted local_revision (monotonic guard)
-	at            time.Time
-}
-
-// NewPusher creates a task-result pusher.
 func NewPusher() *Pusher {
-	return &Pusher{cursor: make(map[string]pushCursor)}
+	p := &Pusher{}
+	for i := range p.locks {
+		p.locks[i] = make(chan struct{}, 1)
+	}
+	return p
 }
 
-// defaultPusher is shared by the HTTP-triggered pushes and the session state-change
-// listener so both advance the same per-task watermark and revision guard.
 var defaultPusher = NewPusher()
 
-// DefaultPusher returns the process-wide task-result pusher.
-func DefaultPusher() *Pusher {
-	return defaultPusher
-}
+func DefaultPusher() *Pusher { return defaultPusher }
 
-// PushTaskSync aggregates the task's latest state and pushes the increment to the cloud.
-// It is safe for concurrent calls; the watermark is only advanced after a successful push.
 func (p *Pusher) PushTaskSync(ctx context.Context, db *sql.DB, client *cloud.Client, taskUUID string) error {
-	if db == nil || client == nil {
-		return fmt.Errorf("任务数据库或云端客户端未初始化")
+	if db == nil || client == nil || client.UserID() == "" {
+		return fmt.Errorf("cloud account is not ready")
 	}
-	watermark := p.watermark(taskUUID)
-	payload, err := BuildTaskSync(ctx, db, taskUUID, watermark)
+	sum := sha256.Sum256([]byte(taskUUID))
+	lock := p.locks[int(sum[0])%len(p.locks)]
+	select {
+	case lock <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-lock }()
+	owned, err := ownsTask(ctx, db, client, taskUUID)
 	if err != nil {
 		return err
 	}
-	if payload == nil {
-		applog.Warn("[CloudSync] 任务投影未生成（BuildTaskSync 返回空），本次未向云端推送，详见上方跳过原因", "task_uuid", taskUUID)
-		return nil
+	if owned {
+		if err = CaptureTaskExecution(ctx, db, taskUUID); err != nil {
+			return err
+		}
 	}
-	// Monotonic revision guard: two pushes within the same millisecond would otherwise
-	// share a revision and the cloud rejects the second one as a hash conflict.
-	payload.LocalRevision = p.reserveRevision(taskUUID, payload.LocalRevision)
-	result, err := client.PushPipelineTaskSync(ctx, *payload)
-	if err != nil {
-		return err
-	}
-	p.commitRevision(taskUUID, payload.LocalRevision)
-	if result.Result == "duplicate" {
-		// The cloud already has this revision; keep the local watermark unchanged so the
-		// next push retries with a newer revision instead of silently dropping data.
-		return nil
-	}
-	p.advanceWatermark(taskUUID, payload.LastLocalUpdatedAt)
-	return nil
+	return deliverTaskSnapshots(ctx, db, client, taskUUID)
 }
 
-// ForgetTask drops the in-memory incremental cursor for a locally deleted task.
-// It deliberately does NOT delete the cloud run record: run records on the cloud are
-// shared team audit data (需求 1896), and a local delete must not erase other members'
-// or past runs. Forgetting the cursor only stops later session pushes for this task
-// from being pushed as if it were new after deletion.
-func (p *Pusher) ForgetTask(taskUUID string) {
-	p.mu.Lock()
-	delete(p.cursor, taskUUID)
-	p.mu.Unlock()
-}
-
-func (p *Pusher) watermark(taskUUID string) int64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	c, ok := p.cursor[taskUUID]
-	if !ok || time.Since(c.at) > cursorTTL {
-		return 0
-	}
-	return c.lastCreatedAt
-}
-
-func (p *Pusher) advanceWatermark(taskUUID string, lastLocalUpdatedAt string) {
-	watermark := parseMillis(lastLocalUpdatedAt)
-	if watermark <= 0 {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	c := p.cursor[taskUUID]
-	if watermark > c.lastCreatedAt {
-		c.lastCreatedAt = watermark
-		c.at = time.Now()
-		p.cursor[taskUUID] = c
-	}
-}
-
-// reserveRevision returns a task revision strictly greater than any revision already
-// accepted by the cloud for this task, protecting against same-millisecond pushes.
-func (p *Pusher) reserveRevision(taskUUID string, candidate int64) int64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if last := p.cursor[taskUUID].lastRevision; candidate <= last {
-		return last + 1
-	}
-	return candidate
-}
-
-// commitRevision records the revision accepted by the cloud after a successful push.
-func (p *Pusher) commitRevision(taskUUID string, revision int64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	c := p.cursor[taskUUID]
-	if revision > c.lastRevision {
-		c.lastRevision = revision
-		p.cursor[taskUUID] = c
-	}
-}
+// Local deletion does not remove already queued team audit records.
+func (p *Pusher) ForgetTask(taskUUID string) {}
 
 // BuildTaskSync aggregates the task's incremental sync payload from the local database.
 // Returns nil when the task is not a cloud task (or is already gone).
-func BuildTaskSync(ctx context.Context, db *sql.DB, taskUUID string, sinceCreatedAt int64) (*cloud.PipelineTaskSync, error) {
+func BuildTaskSync(ctx context.Context, db syncQueryer, taskUUID string, sinceCreatedAt int64) (*cloud.PipelineTaskSync, error) {
 	base, err := loadTaskBase(ctx, db, taskUUID)
 	if err != nil {
 		return nil, err
@@ -151,13 +70,8 @@ func BuildTaskSync(ctx context.Context, db *sql.DB, taskUUID string, sinceCreate
 	if base == nil {
 		return nil, nil
 	}
-	if base.pipeline.ID <= 0 || base.workItem.ID <= 0 || base.workItem.WorkspaceID <= 0 {
-		// Pipeline not assigned yet (or legacy row missing work-item links): the cloud
-		// would reject the payload, so skip the push until the task is complete.
-		applog.Warn("[CloudSync] 任务投影跳过推送：流水线或工作项未就绪（未分配流水线快照/工作项关联缺失），云端不会创建任务记录",
-			"task_uuid", taskUUID, "pipeline_id", base.pipeline.ID, "work_item_id", base.workItem.ID, "workspace_id", base.workItem.WorkspaceID)
-		return nil, nil
-	}
+	// Preserve incomplete legacy metadata in the local outbox as well. Delivery
+	// can repair the work-item link when the matching account is online again.
 	steps, err := loadTaskSteps(ctx, db, taskUUID)
 	if err != nil {
 		return nil, err
@@ -199,7 +113,7 @@ type taskBase struct {
 	executionIndex     int
 }
 
-func loadTaskBase(ctx context.Context, db *sql.DB, taskUUID string) (*taskBase, error) {
+func loadTaskBase(ctx context.Context, db syncQueryer, taskUUID string) (*taskBase, error) {
 	var sourceType, workItemType, workItemID, workspaceID, title string
 	var taskStatus, execStatus, currentStepUUID, cliType, executionMode string
 	var pipelineID, pipelineName, expertSourceUUID, expertName, executionTool string
@@ -233,6 +147,7 @@ func loadTaskBase(ctx context.Context, db *sql.DB, taskUUID string) (*taskBase, 
 		applog.Info("[CloudSync] 任务投影跳过推送：仅 cloud 来源任务才镜像到云端", "task_uuid", taskUUID, "source_type", sourceType)
 		return nil, nil
 	}
+	title = clipRunes(taskUUID, "title", title, cloudTitleMaxRunes)
 	workItemIDInt, _ := strconv.ParseInt(workItemID, 10, 64)
 	workspaceIDInt, _ := strconv.ParseInt(workspaceID, 10, 64)
 	pipelineIDInt, _ := strconv.ParseInt(pipelineID, 10, 64)
@@ -283,11 +198,16 @@ func loadTaskBase(ctx context.Context, db *sql.DB, taskUUID string) (*taskBase, 
 		}
 		pipelineIDInt = pseudoID
 	}
+	pipelineName = clipRunes(taskUUID, "pipeline_name", pipelineName, cloudPipelineNameMaxRunes)
+	cliType = clipRunes(taskUUID, "cli_type", cliType, cloudCLITypeMaxRunes)
 	currentStepKey := ""
 	if currentStepUUID != "" {
 		_ = db.QueryRowContext(ctx,
 			`SELECT step_key FROM gt_task_steps WHERE task_uuid = ? AND uuid = ?`, taskUUID, currentStepUUID).Scan(&currentStepKey)
 	}
+	currentStepKey = clipRunes(taskUUID, "current_step_key", currentStepKey, cloudStepKeyMaxRunes)
+	taskStatus = clipRunes(taskUUID, "task_status", taskStatus, cloudStatusMaxRunes)
+	execStatus = clipRunes(taskUUID, "execution_status", execStatus, cloudStatusMaxRunes)
 	base := &taskBase{
 		workItem: cloud.PipelineTaskWorkItem{
 			Type:        workItemType,
@@ -322,7 +242,7 @@ func loadTaskBase(ctx context.Context, db *sql.DB, taskUUID string) (*taskBase, 
 
 // ======================== Steps aggregation ========================
 
-func loadTaskSteps(ctx context.Context, db *sql.DB, taskUUID string) ([]cloud.PipelineTaskStep, error) {
+func loadTaskSteps(ctx context.Context, db syncQueryer, taskUUID string) ([]cloud.PipelineTaskStep, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT step_key, name, status, execution_status, prompt_snapshot, output_summary, error_summary,
 		       input_tokens, output_tokens, total_tokens, conversation_rounds,
@@ -341,11 +261,13 @@ func loadTaskSteps(ctx context.Context, db *sql.DB, taskUUID string) ([]cloud.Pi
 			&startedAt, &finishedAt, &durationMs, &sortOrder); err != nil {
 			return nil, fmt.Errorf("读取任务步骤失败: %w", err)
 		}
+		stepKey = clipRunes(taskUUID, "step_key", stepKey, cloudStepKeyMaxRunes)
+		name = clipRunes(taskUUID, "step_name", name, cloudStepNameMaxRunes)
 		steps = append(steps, cloud.PipelineTaskStep{
 			StepKey:       stepKey,
 			StepName:      name,
 			SortOrder:     int(sortOrder),
-			Status:        cloudStepStatus(status, execStatus),
+			Status:        clipRunes(taskUUID, "step_status", cloudStepStatus(status, execStatus), cloudStatusMaxRunes),
 			PromptSummary: truncateRunes(strings.TrimSpace(promptSnapshot), 512),
 			OutputSummary: outputSummary,
 			ErrorSummary:  errorSummary,
@@ -418,9 +340,9 @@ type stepConversationResult struct {
 // renumbered to be contiguous 1..N: the cloud upserts the conversation as a whole,
 // so a truncated round list would overwrite earlier rounds and follow-up questions
 // would never appear on the cloud.
-func buildStepConversation(ctx context.Context, db *sql.DB, taskUUID, stepUUID string) (*stepConversationResult, error) {
+func buildStepConversation(ctx context.Context, db syncQueryer, taskUUID, stepUUID string) (*stepConversationResult, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT cs.session_uuid, cs.round_no,
+		SELECT s.uuid, COALESCE(cs.round_no, s.run_no),
 		       COALESCE((
 		         SELECT p.user_prompt FROM gt_task_progress p
 		         WHERE p.session_uuid = s.uuid AND p.record_type = 'user_question'
@@ -434,13 +356,13 @@ func buildStepConversation(ctx context.Context, db *sql.DB, taskUUID, stepUUID s
 		       COALESCE(cs.response_summary, ''),
 		       COALESCE(s.input_tokens,0), COALESCE(s.output_tokens,0), COALESCE(s.total_tokens,0),
 		       COALESCE(cs.token_input,0), COALESCE(cs.token_output,0), COALESCE(cs.token_total,0),
-		       COALESCE(s.duration_ms,0), COALESCE(cs.duration_ms,0), cs.created_at,
+		       COALESCE(s.duration_ms,0), COALESCE(cs.duration_ms,0), s.created_at,
 		       COALESCE(s.status,''), COALESCE(s.cli_type,''), COALESCE(s.error_message,''),
 		       COALESCE(s.started_at,0), COALESCE(s.finished_at,0)
-		 FROM gt_conversation_summaries cs
-		 JOIN gt_cli_sessions s ON s.uuid = cs.session_uuid
-		 WHERE s.task_uuid = ? AND s.step_uuid = ? AND cs.created_at > 0
-		 ORDER BY cs.created_at, cs.rowid`, taskUUID, stepUUID)
+		 FROM gt_cli_sessions s
+		 LEFT JOIN gt_conversation_summaries cs ON cs.session_uuid = s.uuid
+		 WHERE s.task_uuid = ? AND s.step_uuid = ?
+		 ORDER BY s.created_at, s.run_no, s.rowid`, taskUUID, stepUUID)
 	if err != nil {
 		return nil, fmt.Errorf("查询步骤会话摘要失败: %w", err)
 	}
@@ -487,21 +409,18 @@ func buildStepConversation(ctx context.Context, db *sql.DB, taskUUID, stepUUID s
 	}
 	for index, r := range rounds {
 		assistant := strings.TrimSpace(r.assistantMessage)
-		if assistant == "" {
-			assistant = assistantMessageContent(r)
+		messages := make([]cloud.PipelineTaskMessage, 0, 1)
+		if assistant != "" {
+			messages = append(messages, cloud.PipelineTaskMessage{Sequence: 1, Role: "assistant", Content: assistant})
 		}
 		result.content.Rounds = append(result.content.Rounds, cloud.PipelineTaskRound{
-			RoundNo:     index + 1, // renumbered to be contiguous
-			SessionUUID: r.sessionUUID,
-			Status:      r.status,
-			UserMessage: r.userMessage,
-			AssistantMessages: []cloud.PipelineTaskMessage{{
-				Sequence: 1,
-				Role:     "assistant",
-				Content:  assistant,
-			}},
-			Events:       eventsBySession[r.sessionUUID],
-			ErrorSummary: r.errorSummary,
+			RoundNo:           index + 1, // renumbered to be contiguous
+			SessionUUID:       r.sessionUUID,
+			Status:            r.status,
+			UserMessage:       r.userMessage,
+			AssistantMessages: messages,
+			Events:            eventsBySession[r.sessionUUID],
+			ErrorSummary:      r.errorSummary,
 			Usage: cloud.PipelineTaskUsage{
 				InputTokens:        r.inputTokens,
 				OutputTokens:       r.outputTokens,
@@ -555,7 +474,7 @@ type storedProcessEvent struct {
 
 // loadStepProcessEvents reads the local execution timeline (thinking, output,
 // tool calls, tool results, permission requests) for every session of the step.
-func loadStepProcessEvents(ctx context.Context, db *sql.DB, taskUUID, stepUUID string) (map[string][]cloud.PipelineTaskProcessEvent, bool, error) {
+func loadStepProcessEvents(ctx context.Context, db syncQueryer, taskUUID, stepUUID string) (map[string][]cloud.PipelineTaskProcessEvent, bool, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT e.session_uuid, e.sequence, e.event_type, e.payload_json, e.created_at
 		 FROM gt_session_events e
@@ -586,6 +505,10 @@ func loadStepProcessEvents(ctx context.Context, db *sql.DB, taskUUID, stepUUID s
 			truncated = true
 		}
 		if len(grouped[sessionUUID]) >= maxProcessEventsPerRound {
+			truncated = true
+			continue
+		}
+		if eventSequenceUsed(grouped[sessionUUID], event.Sequence) {
 			truncated = true
 			continue
 		}
@@ -661,6 +584,26 @@ func permissionEventContent(stored storedProcessEvent) string {
 	return strings.Join(parts, "；")
 }
 
+func eventSequenceUsed(events []cloud.PipelineTaskProcessEvent, sequence int) bool {
+	for _, event := range events {
+		if event.Sequence == sequence {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateUTF8Bytes(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	cut := value[:max]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
+}
+
 func fitProcessContent(content string, used int) (string, bool) {
 	remaining := maxProcessEventsBytesPerRound - used
 	if remaining <= 0 {
@@ -706,6 +649,92 @@ func assistantMessageContent(r roundRow) string {
 		return content
 	}
 	return "CLI 执行" + r.status
+}
+
+// Cloud pipeline_tasks columns are short VARCHAR values. A single over-long name,
+// CLI id, or step key makes Postgres reject the insert, and the cloud reports that
+// as HTTP 400 "参数无效". The local task can still be done while the requirement
+// Agent tab never receives a row. Clip to the column character limits before sending.
+const (
+	cloudTitleMaxRunes        = 500
+	cloudPipelineNameMaxRunes = 100
+	cloudCLITypeMaxRunes      = 20
+	cloudStatusMaxRunes       = 20
+	cloudStepKeyMaxRunes      = 64
+	cloudStepNameMaxRunes     = 100
+)
+
+func clipRunes(taskUUID, field, value string, max int) string {
+	clipped := truncateRunes(value, max)
+	if clipped != value {
+		applog.Warn("[CloudSync] 任务投影字段超过云端列长度，已截断后推送",
+			"task_uuid", taskUUID, "field", field, "max_runes", max)
+	}
+	return clipped
+}
+
+// repairCloudWorkItemLink fills a cloud task's workspace and work-item type from
+// 「我的工作」 before the projection is built. workspace_id<=0 or a type other than
+// requirement/defect makes the client skip the push, so the Agent tab stays empty
+// even after the local task is marked done. The import list cannot be used here:
+// it labels defects as requirements and only returns the newest page.
+func repairCloudWorkItemLink(ctx context.Context, db *sql.DB, client *cloud.Client, taskUUID string) error {
+	var sourceType, workItemType, workItemID string
+	var workspaceID int64
+	err := db.QueryRowContext(ctx, `
+		SELECT t.source_type,
+		       COALESCE(NULLIF(t.work_item_type, ''), t.cloud_work_item_type, ''),
+		       COALESCE(NULLIF(t.work_item_id, ''), t.cloud_work_item_id, ''),
+		       COALESCE(t.workspace_id, 0)
+		FROM gt_tasks t WHERE t.uuid = ?`, taskUUID).Scan(&sourceType, &workItemType, &workItemID, &workspaceID)
+	if err == sql.ErrNoRows || sourceType != "cloud" {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("读取任务工作项关联失败: %w", err)
+	}
+	workItemType = strings.TrimSpace(workItemType)
+	workItemID = strings.TrimSpace(workItemID)
+	typeValid := workItemType == "requirement" || workItemType == "defect"
+	if workspaceID > 0 && typeValid {
+		return nil
+	}
+	if _, parseErr := strconv.ParseInt(workItemID, 10, 64); parseErr != nil || workItemID == "" || workItemID == "0" {
+		return nil
+	}
+	result, err := client.GetMyWork(ctx)
+	if err != nil {
+		return err
+	}
+	foundWorkspace, itemType, found := cloud.LookupMyWorkItem(result.List, workItemID)
+	if !found || foundWorkspace <= 0 {
+		applog.Warn("[CloudSync] 我的工作中没有这条工作项，无法补全 workspace_id，任务投影仍会跳过",
+			"task_uuid", taskUUID, "work_item_id", workItemID, "work_item_type", workItemType)
+		return nil
+	}
+	if itemType != "requirement" && itemType != "defect" {
+		itemType = workItemType
+	}
+	res, err := db.ExecContext(ctx, `
+		UPDATE gt_tasks
+		SET workspace_id = CASE WHEN COALESCE(workspace_id, 0) > 0 THEN workspace_id ELSE ? END,
+		    work_item_type = CASE
+		      WHEN work_item_type IN ('requirement', 'defect') THEN work_item_type
+		      WHEN ? IN ('requirement', 'defect') THEN ?
+		      ELSE work_item_type
+		    END,
+		    updated_at = ?
+		WHERE uuid = ? AND source_type = 'cloud'
+		  AND (COALESCE(workspace_id, 0) <= 0 OR IFNULL(work_item_type, '') NOT IN ('requirement', 'defect'))`,
+		foundWorkspace, itemType, itemType, time.Now().UnixMilli(), taskUUID)
+	if err != nil {
+		return fmt.Errorf("写回工作项关联失败: %w", err)
+	}
+	if rows, rowsErr := res.RowsAffected(); rowsErr == nil && rows > 0 {
+		applog.Info("[CloudSync] 已补全云端工作项关联",
+			"task_uuid", taskUUID, "workspace_id", foundWorkspace, "work_item_type", itemType)
+	}
+	return nil
 }
 
 // ======================== Helpers ========================

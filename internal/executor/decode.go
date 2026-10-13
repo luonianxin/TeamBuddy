@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
+
+	"goteams-client/internal/applog"
 )
 
 // EmitFunc 是解码器的事件出口。解码器只负责翻译协议，不关心事件如何被消费。
@@ -13,12 +16,17 @@ type EmitFunc func(ExecutorEvent)
 
 // Outcome 汇总解码过程中收集到的协议侧执行结果。
 type Outcome struct {
-	SessionID     string
-	InputTokens   int
-	OutputTokens  int
-	UsageSeen     bool
-	FailureReason string   // 非空表示协议层判定本次执行失败
-	ExtraDetails  []string // 协议特有诊断信息（如未解析输出），拼进失败原因
+	SessionID       string
+	InputTokens     int
+	OutputTokens    int
+	UsageSeen       bool
+	FailureReason   string   // 非空表示协议层判定本次执行失败
+	ExtraDetails    []string // 协议特有诊断信息（如未解析输出），拼进失败原因
+	ExitHint        ExitClass
+	MissingTerminal bool
+	MissingDetail   string
+	ProtocolSeen    bool
+	TerminalSeen    bool
 }
 
 // Decoder 把一个 CLI 的原始输出翻译成统一事件流。
@@ -52,13 +60,17 @@ type ContentBlock struct {
 type BaseDecoder struct {
 	DisplayName string
 
-	sessionID     string
-	inputTokens   int
-	outputTokens  int
-	usageSeen     bool
-	terminalSeen  bool
-	failureReason string
-	details       []string
+	sessionID       string
+	inputTokens     int
+	outputTokens    int
+	usageSeen       bool
+	terminalSeen    bool
+	failureReason   string
+	details         []string
+	exitHint        ExitClass
+	missingTerminal bool
+	missingDetail   string
+	protocolSeen    bool
 }
 
 // NewBaseDecoder 创建基础解码器。
@@ -75,6 +87,25 @@ func (b *BaseDecoder) SessionID() string {
 func (b *BaseDecoder) SetSession(id string) {
 	if id != "" {
 		b.sessionID = id
+		b.protocolSeen = true
+	}
+}
+
+// SetExitHint 记录解码器已经能确定的退出分类。空值不覆盖。
+func (b *BaseDecoder) SetExitHint(class ExitClass) {
+	if class != "" && b.exitHint == "" {
+		b.exitHint = class
+	}
+}
+
+// ClearExitHint 在后续成功终态到来时去掉早先的失败提示。
+func (b *BaseDecoder) ClearExitHint() { b.exitHint = "" }
+
+// Heartbeat 通知看门狗有协议活动，不产生可展示事件。
+func (b *BaseDecoder) Heartbeat(emit EmitFunc) {
+	b.protocolSeen = true
+	if emit != nil {
+		emit(ExecutorEvent{Type: EventHeartbeat})
 	}
 }
 
@@ -111,15 +142,17 @@ func (b *BaseDecoder) MarkTerminal() {
 func (b *BaseDecoder) Fail(reason string) {
 	if b.failureReason == "" && reason != "" {
 		b.failureReason = reason
+		b.protocolSeen = true
 	}
 }
 
-// FailMissingTerminal 在未收到终态事件时填充标准失败原因。
+// FailMissingTerminal 标记没有协议终态。这不是 fatal_cli，续跑判定会另做分类。
 func (b *BaseDecoder) FailMissingTerminal(terminalName string) {
 	if b.terminalSeen || b.failureReason != "" {
 		return
 	}
-	b.failureReason = fmt.Sprintf("%s 未输出有效的 %s 结束事件", b.DisplayName, terminalName)
+	b.missingTerminal = true
+	b.missingDetail = fmt.Sprintf("%s 未输出有效的 %s 结束事件", b.DisplayName, terminalName)
 }
 
 // AddDetail 追加协议特有诊断信息，仅在判定失败时拼进错误详情。
@@ -134,12 +167,17 @@ func (b *BaseDecoder) AddDetail(detail string) {
 // Outcome 返回协议侧执行结果。
 func (b *BaseDecoder) Outcome() Outcome {
 	return Outcome{
-		SessionID:     b.sessionID,
-		InputTokens:   b.inputTokens,
-		OutputTokens:  b.outputTokens,
-		UsageSeen:     b.usageSeen,
-		FailureReason: b.failureReason,
-		ExtraDetails:  b.details,
+		SessionID:       b.sessionID,
+		InputTokens:     b.inputTokens,
+		OutputTokens:    b.outputTokens,
+		UsageSeen:       b.usageSeen,
+		FailureReason:   b.failureReason,
+		ExtraDetails:    b.details,
+		ExitHint:        b.exitHint,
+		MissingTerminal: b.missingTerminal,
+		MissingDetail:   b.missingDetail,
+		ProtocolSeen:    b.protocolSeen,
+		TerminalSeen:    b.terminalSeen,
 	}
 }
 
@@ -172,6 +210,11 @@ func (b *BaseDecoder) emitToolResult(id, content string, partial bool, emit Emit
 // ToolCall 发射一条工具调用事件。内容统一为「工具名 参数摘要」，与前端解析约定一致。
 // toolUseID 是协议侧的工具调用 ID，协议未提供时传空字符串。
 func (b *BaseDecoder) ToolCall(toolUseID, name, args string, emit EmitFunc) {
+	b.ToolCallKind(toolUseID, name, args, "", emit)
+}
+
+// ToolCallKind 与 ToolCall 相同，并带上协议侧工具种类。
+func (b *BaseDecoder) ToolCallKind(toolUseID, name, args, kind string, emit EmitFunc) {
 	name = strings.TrimSpace(name)
 	args = OneLine(args)
 	content := name
@@ -182,7 +225,19 @@ func (b *BaseDecoder) ToolCall(toolUseID, name, args string, emit EmitFunc) {
 			content = content + " " + args
 		}
 	}
-	b.emitContentWithID(EventToolCall, toolUseID, content, emit)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return
+	}
+	b.protocolSeen = true
+	emit(ExecutorEvent{
+		Type:      EventToolCall,
+		Content:   content,
+		SessionID: b.sessionID,
+		ToolUseID: strings.TrimSpace(toolUseID),
+		ToolKind:  kind,
+		Timestamp: NowMillis(),
+	})
 }
 
 // Permission 发射权限请求事件。
@@ -239,7 +294,12 @@ func DecodeContentBlocks(blocks []ContentBlock, base *BaseDecoder, emit EmitFunc
 		case "text":
 			base.Message(block.Text, emit)
 		case "tool_use", "tool_call":
-			base.ToolCall(block.ID, block.Name, FormatToolArgs(block.Input), emit)
+			kind := ""
+			switch strings.ToLower(strings.TrimSpace(block.Name)) {
+			case "bash", "shell":
+				kind = ToolKindShell
+			}
+			base.ToolCallKind(block.ID, block.Name, FormatToolArgs(block.Input), kind, emit)
 		case "tool_result":
 			content := RawText(block.Content)
 			if content == "" {
@@ -327,6 +387,7 @@ func (a *StreamAdapter) run(ctx context.Context, opts RunOptions, resumeSession 
 		EnvVars:    opts.EnvVars,
 		StdinText:  invocation.StdinText,
 		PromptFile: invocation.PromptFile,
+		Watchdog:   opts.Watchdog,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("启动 %s 失败: %w", displayName, err)
@@ -342,6 +403,10 @@ func (a *StreamAdapter) run(ctx context.Context, opts RunOptions, resumeSession 
 		defer a.clearProcess(proc)
 
 		emit := func(event ExecutorEvent) {
+			if event.Type == EventHeartbeat {
+				proc.ObserveHeartbeat()
+				return
+			}
 			if event.Timestamp == 0 {
 				event.Timestamp = NowMillis()
 			}
@@ -358,32 +423,185 @@ func (a *StreamAdapter) run(ctx context.Context, opts RunOptions, resumeSession 
 		}
 
 		emit(NewEvent(EventStart))
-		for line := range proc.Lines() {
-			decoder.Decode(line, emit)
+		lines := proc.Lines()
+		activities := proc.Activities()
+		rootExited := proc.RootExited()
+		var drain <-chan time.Time
+		var drainTimer *time.Timer
+		startDrain := func() {
+			if drainTimer == nil {
+				drainTimer = time.NewTimer(proc.DrainAfter())
+				drain = drainTimer.C
+			}
 		}
-		decoder.Done(emit)
-
+		exited := false
+		terminalHandled := false
+		completedEarly := false
+		for {
+			select {
+			case event := <-activities:
+				if !completedEarly {
+					emit(event)
+				}
+			case line, ok := <-lines:
+				if !ok {
+					lines = nil
+					if exited || completedEarly {
+						goto finish
+					}
+					continue
+				}
+				if completedEarly {
+					// 终态已上报，剩余输出只排空，不再产生事件。
+					continue
+				}
+				decoder.Decode(line, emit)
+				if !terminalHandled && decoderTurnEnded(decoder) {
+					terminalHandled = true
+					// 终态事件之后不再等 stdout EOF / 根进程退出：
+					// MCP 常驻、后台命令的孙进程占着 stdout 都会让那两个条件迟迟不满足。
+					// 成功终态立即展示缓冲答复，执行完成仍等待进程收尾；失败终态最多再等一个排空窗口。
+					completedEarly = a.completeEarly(decoder, proc, emit)
+					startDrain()
+				}
+			case <-rootExited:
+				rootExited = nil // A closed channel stays ready; disable it while draining.
+				exited = true
+				if lines == nil || completedEarly {
+					goto finish
+				}
+				startDrain()
+			case <-drain:
+				goto finish
+			}
+		}
+	finish:
+		if drainTimer != nil {
+			drainTimer.Stop()
+		}
+		reapErr := proc.ReapGroup(proc.wdCfg.TermGrace)
+		// Stop inherited writers first, then drain the pipe. Time spent persisting
+		// events is not evidence of a stuck writer and must not discard the tail.
+		drainComplete := true
+		if lines != nil {
+			drainComplete = proc.drainStdout(ctx, func(line string) {
+				if !completedEarly {
+					decoder.Decode(line, emit)
+				}
+			})
+		}
+		if reapErr != nil {
+			applog.Warn("[Executor] process cleanup failed", "cli", displayName, "pid", proc.Pid(), "error", reapErr)
+		}
+		if reapErr != nil {
+			// Keep the task occupied until the tree is empty. Do not repeatedly
+			// kill it: the user can retry Stop while this bounded-rate check waits.
+			emit(ExecutorEvent{Type: EventActivity, Content: ActivitySuspect,
+				Activity: &ActivityInfo{Kind: ActivitySuspect, Detail: "process_cleanup"}})
+			ticker := time.NewTicker(time.Second)
+			for reapErr != nil && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+				case <-ticker.C:
+					if proc.GroupEmpty() {
+						reapErr = nil
+					}
+				}
+			}
+			ticker.Stop()
+		}
+		if !completedEarly {
+			decoder.Done(emit)
+		}
 		result := proc.WaitFor()
 		outcome := decoder.Outcome()
-		if proc.IdleStopped() || outcome.FailureReason != "" || result.ScanErr != nil || result.WaitErr != nil || result.StdinErr != nil {
-			reason := outcome.FailureReason
-			if msg := proc.IdleStopMessage(); msg != "" {
-				reason = msg
-			} else if reason == "" && result.StdinErr != nil {
-				reason = "写入 " + displayName + " Prompt 失败: " + result.StdinErr.Error()
-			}
-			emit(ExecutorEvent{
-				Type:      EventError,
-				Error:     FormatExecutionError(displayName, reason, result.Stderr, outcome.ExtraDetails, result.ScanErr, result.WaitErr),
-				SessionID: outcome.SessionID,
-				Timestamp: NowMillis(),
-			})
+		class := ClassifyExit(ExitFacts{
+			TerminalSeen:    outcome.TerminalSeen,
+			FailureReason:   outcome.FailureReason,
+			ExitHint:        outcome.ExitHint,
+			MissingTerminal: outcome.MissingTerminal,
+			IdleStop:        proc.IdleStopMessage(),
+			StallKilled:     proc.StallKilled(),
+			UserStopped:     proc.UserStopped(),
+			ExitCode:        result.ExitCode,
+			WaitErr:         result.WaitErr,
+			ScanErr:         result.ScanErr,
+			StdinErr:        result.StdinErr,
+			Stderr:          result.Stderr,
+			SawProtocol:     outcome.ProtocolSeen || proc.SawProtocol(),
+		})
+		if reapErr != nil || (!drainComplete && !decoderTurnEnded(decoder) && !proc.UserStopped()) {
+			// Never auto-resume while the previous process tree may still be alive.
+			// Truncated output can also hide an unconfirmed tool operation. Loose
+			// terminal adapters (e.g. Kimi) do not prove a turn actually ended.
+			class = ExitFatalCLI
+		}
+		if class == ExitCompleted {
+			event := NewCompleteEvent(outcome.SessionID, outcome.InputTokens, outcome.OutputTokens)
+			event.ExitClass = string(ExitCompleted)
+			emit(event)
 			return
 		}
-		emit(NewCompleteEvent(outcome.SessionID, outcome.InputTokens, outcome.OutputTokens))
+		reason := outcome.FailureReason
+		if msg := proc.IdleStopMessage(); msg != "" {
+			reason = msg
+		} else if reason == "" && outcome.MissingDetail != "" {
+			reason = outcome.MissingDetail
+		} else if reason == "" && result.StdinErr != nil {
+			reason = "写入 " + displayName + " Prompt 失败: " + result.StdinErr.Error()
+		}
+		emit(ExecutorEvent{
+			Type:      EventError,
+			Error:     FormatExecutionError(displayName, reason, result.Stderr, outcome.ExtraDetails, nil, result.WaitErr),
+			SessionID: outcome.SessionID,
+			ExitClass: string(class),
+			Timestamp: NowMillis(),
+		})
 	}()
 
 	return eventCh, nil
+}
+
+// looseTerminal 由「解析到任意事件就 MarkTerminal」的解码器实现（Kimi、Grok），
+// 它们的 TerminalSeen 不代表一轮结束，只能等 EOF 后在 Done 里收尾。
+type looseTerminal interface{ LooseTerminal() bool }
+
+type terminalReporter interface{ TerminalSeen() bool }
+
+func decoderTurnEnded(decoder Decoder) bool {
+	if loose, ok := decoder.(looseTerminal); ok && loose.LooseTerminal() {
+		return false
+	}
+	reporter, ok := decoder.(terminalReporter)
+	return ok && reporter.TerminalSeen()
+}
+
+// completeEarly flushes a successful protocol result without completing its process lifetime.
+func (a *StreamAdapter) completeEarly(decoder Decoder, proc *Process, emit EmitFunc) bool {
+	facts := func(outcome Outcome) ExitFacts {
+		return ExitFacts{
+			TerminalSeen:    outcome.TerminalSeen,
+			FailureReason:   outcome.FailureReason,
+			ExitHint:        outcome.ExitHint,
+			MissingTerminal: outcome.MissingTerminal,
+			IdleStop:        proc.IdleStopMessage(),
+			StallKilled:     proc.StallKilled(),
+			UserStopped:     proc.UserStopped(),
+			SawProtocol:     true,
+		}
+	}
+	if ClassifyExit(facts(decoder.Outcome())) != ExitCompleted {
+		return false
+	}
+	// Done 只做终态缺失检查和缓冲收尾（如 OpenCode 的按步 token 合计）。
+	decoder.Done(emit)
+	outcome := decoder.Outcome()
+	if ClassifyExit(facts(outcome)) != ExitCompleted {
+		return false
+	}
+	// Visible message buffers are now flushed. The completion event is emitted
+	// only after process cleanup, so a new turn cannot overlap surviving tools.
+	return true
 }
 
 func (a *StreamAdapter) displayName() string {

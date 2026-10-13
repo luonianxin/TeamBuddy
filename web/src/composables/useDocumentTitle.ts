@@ -8,7 +8,7 @@ import {
   type MaybeRefOrGetter,
 } from 'vue'
 
-const APP_TITLE = 'TeamsBoard'
+const APP_TITLE = 'TeamBuddy'
 
 type TitleSource = MaybeRefOrGetter<string | null | undefined>
 

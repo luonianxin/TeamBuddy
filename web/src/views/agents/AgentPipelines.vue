@@ -88,7 +88,7 @@
 import { computed, onActivated, onDeactivated, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { message, Modal } from 'ant-design-vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import apiClient, { ApiError } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { usePipelineStore } from '@/stores/pipeline'
@@ -112,6 +112,7 @@ import {
 import { useAppI18n } from '@/i18n'
 
 const route = useRoute()
+const router = useRouter()
 const authStore = useAuthStore()
 const pipelineStore = usePipelineStore()
 const { pipelines, loaded } = storeToRefs(pipelineStore)
@@ -132,7 +133,20 @@ const editingPipeline = ref<Pipeline>()
 const editingStep = ref<PipelineStep>()
 const editingStepAvatar = ref<string>(AGENT_AVATARS[0])
 const pageActive = ref(true)
-const managementMode = ref<'pipeline' | 'expert_group'>('pipeline')
+type ManagementMode = 'pipeline' | 'expert_group'
+const MANAGEMENT_MODE_STORAGE_KEY = 'goteams.agents.management-mode'
+
+function readManagementMode(): ManagementMode {
+  try {
+    return window.localStorage.getItem(MANAGEMENT_MODE_STORAGE_KEY) === 'expert_group'
+      ? 'expert_group'
+      : 'pipeline'
+  } catch {
+    return 'pipeline'
+  }
+}
+
+const managementMode = ref<ManagementMode>(readManagementMode())
 const { t } = useAppI18n()
 let hasActivatedOnce = false
 
@@ -154,9 +168,22 @@ function pipelineUuidFromQuery() {
   return Array.isArray(value) ? value[0] || '' : value || ''
 }
 
+function rememberManagementMode(mode: ManagementMode) {
+  managementMode.value = mode
+  try {
+    window.localStorage.setItem(MANAGEMENT_MODE_STORAGE_KEY, mode)
+  } catch {
+    // 本地存储不可用时，仍保留本次应用会话内的选择。
+  }
+}
+
 function syncManagementModeFromQuery() {
+  if (pipelineUuidFromQuery()) {
+    rememberManagementMode('pipeline')
+    return
+  }
   const value = Array.isArray(route.query.mode) ? route.query.mode[0] : route.query.mode
-  managementMode.value = value === 'expert_group' ? 'expert_group' : 'pipeline'
+  if (value === 'expert_group' || value === 'pipeline') rememberManagementMode(value)
 }
 
 function isActiveAgentRoute() {
@@ -433,9 +460,17 @@ function isExpertGroup(resource: Pipeline | ExpertGroup): resource is ExpertGrou
   return 'ready' in resource
 }
 
-async function changeManagementMode(mode: 'pipeline' | 'expert_group') {
+async function changeManagementMode(mode: ManagementMode) {
   if (expertBatchSaving.value) return
-  managementMode.value = mode
+  rememberManagementMode(mode)
+  const query = { ...route.query }
+  if (mode === 'expert_group') {
+    query.mode = 'expert_group'
+    delete query.pipeline
+  } else {
+    delete query.mode
+  }
+  void router.replace({ query })
 	if (mode === 'expert_group') {
 	  try {
 		await expertGroupStore.load(true)
@@ -497,7 +532,8 @@ function deleteResource(resource: Pipeline | ExpertGroup) {
 <style scoped>
 .agent-page {
   display: flex;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
   flex-direction: column;
   overflow: hidden;
   position: relative;

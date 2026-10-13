@@ -13,7 +13,7 @@
           ? t('workflows.task.executionHistory.collapseSection')
           : t('workflows.task.executionHistory.expandSection')
       "
-      @click="expanded = !expanded"
+      @click="toggleSection"
     >
       <HistoryOutlined aria-hidden="true" />
       <span>{{ t('workflows.task.executionHistory.title', { count: items.length }) }}</span>
@@ -171,6 +171,7 @@ const details = ref(new Map<string, TaskExecutionHistoryDetail>())
 const detailLoadingUuids = ref(new Set<string>())
 const detailErrors = ref(new Map<string, string>())
 let summaryRequestVersion = 0
+let detailContextVersion = 0
 
 async function loadSummaries() {
   const taskUuid = props.taskUuid.trim()
@@ -206,6 +207,17 @@ function isExecutionExpanded(uuid: string) {
   return expandedUuids.value.has(uuid)
 }
 
+function toggleSection() {
+  expanded.value = !expanded.value
+  if (!expanded.value) return
+  expandedUuids.value = new Set(items.value.map((item) => item.uuid))
+  for (const item of items.value) {
+    if (!details.value.has(item.uuid) && !detailLoadingUuids.value.has(item.uuid)) {
+      void loadDetail(item)
+    }
+  }
+}
+
 async function toggleExecution(item: TaskExecutionHistorySummary) {
   const next = new Set(expandedUuids.value)
   if (next.has(item.uuid)) {
@@ -219,6 +231,9 @@ async function toggleExecution(item: TaskExecutionHistorySummary) {
 
 async function loadDetail(item: TaskExecutionHistorySummary) {
   if (detailLoadingUuids.value.has(item.uuid)) return
+  const taskUuid = props.taskUuid.trim()
+  const contextVersion = detailContextVersion
+  if (!taskUuid) return
   const nextLoading = new Set(detailLoadingUuids.value)
   nextLoading.add(item.uuid)
   detailLoadingUuids.value = nextLoading
@@ -227,12 +242,14 @@ async function loadDetail(item: TaskExecutionHistorySummary) {
   detailErrors.value = nextErrors
   try {
     const detail = await apiClient.get<TaskExecutionHistoryDetail>(
-      `/tasks/${encodeURIComponent(props.taskUuid)}/execution-history/${encodeURIComponent(item.uuid)}`,
+      `/tasks/${encodeURIComponent(taskUuid)}/execution-history/${encodeURIComponent(item.uuid)}`,
     )
+    if (contextVersion !== detailContextVersion || taskUuid !== props.taskUuid.trim()) return
     const nextDetails = new Map(details.value)
     nextDetails.set(item.uuid, detail)
     details.value = nextDetails
   } catch (loadError) {
+    if (contextVersion !== detailContextVersion || taskUuid !== props.taskUuid.trim()) return
     const errors = new Map(detailErrors.value)
     errors.set(
       item.uuid,
@@ -242,9 +259,11 @@ async function loadDetail(item: TaskExecutionHistorySummary) {
     )
     detailErrors.value = errors
   } finally {
-    const loadingUuids = new Set(detailLoadingUuids.value)
-    loadingUuids.delete(item.uuid)
-    detailLoadingUuids.value = loadingUuids
+    if (contextVersion === detailContextVersion && taskUuid === props.taskUuid.trim()) {
+      const loadingUuids = new Set(detailLoadingUuids.value)
+      loadingUuids.delete(item.uuid)
+      detailLoadingUuids.value = loadingUuids
+    }
   }
 }
 
@@ -332,6 +351,7 @@ watch(
   () => props.taskUuid,
   (taskUuid, previousTaskUuid) => {
     if (taskUuid === previousTaskUuid) return
+    detailContextVersion += 1
     expanded.value = false
     expandedUuids.value = new Set()
     details.value = new Map()

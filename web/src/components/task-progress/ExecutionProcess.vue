@@ -22,6 +22,7 @@
           spin
         />
         <CheckOutlined v-else-if="succeeded" />
+        <MinusCircleOutlined v-else-if="props.status === 'interrupted' || props.status === 'stopped'" />
         <CloseOutlined v-else />
         {{ stateText }}
       </span>
@@ -92,6 +93,12 @@
               :enabled="isTypingRow(row)"
               @done="markRevealed(row.key)"
             />
+            <button
+              v-if="row.truncNote && row.sequence"
+              type="button"
+              class="exec-full-link"
+              @click.stop="loadFull(row)"
+            >{{ row.truncNote }}</button>
           </div>
         </div>
 
@@ -121,8 +128,12 @@
             :aria-expanded="isRowOpen(row)"
             @click="toggleRow(row)"
           >
+            <MinusCircleOutlined
+              v-if="row.interrupted"
+              class="exec-row-icon is-interrupted"
+            />
             <LoadingOutlined
-              v-if="!row.result && running"
+              v-else-if="!row.result && running"
               class="exec-row-icon icon-running"
               spin
             />
@@ -149,7 +160,7 @@
             <span
               v-if="toolStateText(row)"
               class="exec-row-state"
-              :class="row.result ? 'is-done' : 'is-running'"
+              :class="row.interrupted ? 'is-interrupted' : (row.result ? 'is-done' : 'is-running')"
             >{{ toolStateText(row) }}</span>
             <RowCaret :open="isRowOpen(row)" />
           </button>
@@ -161,6 +172,13 @@
             <p class="exec-row-text is-plain">
               {{ row.result }}
             </p>
+            <p v-if="row.interrupted" class="exec-interrupt-hint">{{ t('workflows.task.progress.toolInterruptedHint') }}</p>
+            <button
+              v-if="row.truncNote && row.sequence"
+              type="button"
+              class="exec-full-link"
+              @click.stop="loadFull(row)"
+            >{{ row.truncNote }}</button>
           </div>
           <div
             v-else-if="isRowOpen(row) && !row.result && running"
@@ -204,6 +222,7 @@ import { apiClient } from '@/api/client'
 import { onMessage, useLocalWSStatus, wsSend } from '@/composables/useLocalWebSocket'
 import { useAppI18n } from '@/i18n'
 import { cliDisplayName } from './utils'
+import { parseTruncMarker } from '@/utils/truncMarker'
 import { useCliNames } from '@/composables/useCliNames'
 import TypewriterText from './TypewriterText.vue'
 
@@ -255,6 +274,9 @@ interface ProcessRow {
   durationText: string
   /** 该行来自本次执行的实时流（而非历史回看），只有它才走打字机揭示 */
   live: boolean
+  interrupted?: boolean
+  truncNote?: string
+  sequence?: number
 }
 
 interface PermissionRequestPayload {
@@ -329,6 +351,7 @@ function scheduleFollowScroll() {
 }
 
 let bodyObserver: MutationObserver | undefined
+let collapseTimer: ReturnType<typeof setTimeout> | undefined
 
 watch(bodyRef, (el) => {
   bodyObserver?.disconnect()
@@ -339,6 +362,8 @@ watch(bodyRef, (el) => {
 })
 
 onBeforeUnmount(() => {
+  unsubscribeEvents()
+  clearTimeout(collapseTimer)
   bodyObserver?.disconnect()
   scrollContainer?.removeEventListener('scroll', handleContainerScroll)
 })
@@ -346,8 +371,43 @@ onBeforeUnmount(() => {
 const running = computed(() => props.status === 'created' || props.status === 'running')
 const failed = computed(() => props.status === 'failed')
 const succeeded = computed(() => props.status === 'success')
+const activityHint = ref('')
+const fullBySequence = ref(new Map<number, string>())
+
+async function loadFull(row: ProcessRow) {
+  if (!row.sequence || !props.sessionUuid) return
+  try {
+    const text = await apiClient.get<string>(
+      `/tasks/sessions/${encodeURIComponent(props.sessionUuid)}/events/${row.sequence}/full`,
+    )
+    const next = new Map(fullBySequence.value)
+    next.set(row.sequence, text)
+    fullBySequence.value = next
+  } catch {
+    const next = new Map(fullBySequence.value)
+    next.set(row.sequence, t('workflows.task.progress.artifactMissing'))
+    fullBySequence.value = next
+  }
+}
+
+const activityText = computed(() => {
+  const key: Record<string, string> = {
+    reconnecting: 'workflows.task.progress.activityReconnecting',
+    retrying: 'workflows.task.progress.activityRetrying',
+    quiet: 'workflows.task.progress.activityQuiet',
+    long_tool: 'workflows.task.progress.activityLongTool',
+    compacting: 'workflows.task.progress.activityCompacting',
+    suspect: 'workflows.task.progress.activitySuspect',
+    slow_launch: 'workflows.task.progress.activitySlowLaunch',
+    calling_model: 'workflows.task.progress.activityCallingModel',
+    model_lost: 'workflows.task.progress.activityModelLost',
+  }
+  const id = key[activityHint.value]
+  return id ? t(id) : ''
+})
 
 const stateText = computed(() => {
+  if (running.value && activityText.value) return activityText.value
   if (running.value) return t('workflows.task.progress.processRunning')
   if (failed.value) return t('workflows.task.progress.processFailed')
   if (props.status === 'success') return t('workflows.task.progress.processDone')
@@ -359,6 +419,7 @@ const stateClass = computed(() => ({
   'is-running': running.value,
   'is-failed': failed.value,
   'is-done': succeeded.value,
+  'is-interrupted': props.status === 'interrupted' || props.status === 'stopped',
 }))
 
 const sortedEvents = computed(() => [...events.value].sort((a, b) => a.sequence - b.sequence))
@@ -433,6 +494,7 @@ function nextEventTimeBySequence(list: SessionEventItem[]) {
 const rows = computed<ProcessRow[]>(() => {
   const list = sortedEvents.value
   const live = liveSequences.value
+  const loaded = fullBySequence.value
   const finalMessageSequence = running.value ? 0 : lastMessageSequence(list)
   const nextTime = nextEventTimeBySequence(list)
   const result: ProcessRow[] = []
@@ -442,7 +504,10 @@ const rows = computed<ProcessRow[]>(() => {
 
   for (const item of list) {
     const type = item.event?.type
-    const content = (item.event?.content || '').trim()
+    const loadedText = loaded.get(item.sequence)
+    const parsed = parseTruncMarker(loadedText ?? item.event?.content ?? '')
+    const content = parsed.text.trim()
+    const truncNote = loadedText ? '' : truncNoteOf(parsed.marker)
 
     if (type === 'thinking') {
       if (!content) continue
@@ -454,20 +519,23 @@ const rows = computed<ProcessRow[]>(() => {
       )
       const nextAt = nextTime.get(item.sequence)
       if (nextAt) row.durationText = formatDuration(eventTime(item), nextAt)
+      row.truncNote = truncNote
+      row.sequence = truncNote ? item.sequence : undefined
       result.push(row)
       continue
     }
 
     if (type === 'message') {
       if (!content || item.sequence === finalMessageSequence) continue
-      result.push(
-        newRow(
-          `output-${item.sequence}`,
-          'output',
-          content,
-          live.has(item.sequence),
-        ),
+      const row = newRow(
+        `output-${item.sequence}`,
+        'output',
+        content,
+        live.has(item.sequence),
       )
+      row.truncNote = truncNote
+      row.sequence = truncNote ? item.sequence : undefined
+      result.push(row)
       continue
     }
 
@@ -491,7 +559,8 @@ const rows = computed<ProcessRow[]>(() => {
     }
 
     if (type !== 'tool_result') continue
-    if (!content) continue
+    const interrupted = item.event?.tool_result_interrupted === true
+    if (!content && !interrupted) continue
 
     const toolUseId = (item.event?.tool_use_id || '').trim()
     let target: ProcessRow | undefined
@@ -507,6 +576,9 @@ const rows = computed<ProcessRow[]>(() => {
 
     // 同一调用可能先有增量输出、再有终态结果，保留最后一次非空内容
     target.result = content
+    target.interrupted = interrupted
+    target.truncNote = truncNote
+    target.sequence = item.sequence
     const started = startedAt.get(target)
     if (started) target.durationText = formatDuration(started, eventTime(item))
   }
@@ -558,7 +630,14 @@ const versionText = computed(() =>
 // 行默认展开态按「这行是否值得直接读」区分：输出行是过程里的结论性文本，默认展开；
 // 思考与工具调用「做了什么」行头已经写清楚，默认收起，要看细节再点开（需求 2202 评论 1）。
 /** 工具行右侧的完成态文案：设计稿在行尾直接标出「已执行完成」 */
+function truncNoteOf(marker: ReturnType<typeof parseTruncMarker>['marker']) {
+  if (!marker) return ''
+  if (!marker.file) return t('workflows.task.progress.artifactUnsaved')
+  return t('workflows.task.progress.artifactViewFull')
+}
+
 function toolStateText(row: ProcessRow) {
+  if (row.interrupted) return t('workflows.task.progress.toolInterrupted')
   if (row.result) return t('workflows.task.progress.processToolDone')
   return running.value ? t('workflows.task.progress.processRunning') : ''
 }
@@ -600,20 +679,24 @@ watch(expanded, (value) => {
   if (running.value) void scrollToLatest()
 })
 
-function maxSequence() {
-  return events.value.reduce((max, item) => Math.max(max, item.sequence), 0)
-}
+// Only a completed HTTP replay proves that all persisted events up to this
+// cursor were received. A higher live event must not skip an unfinished replay.
+let historyCursor = 0
 
 async function loadHistory() {
   if (props.readOnly || !props.sessionUuid) return
+  const sessionUuid = props.sessionUuid
   try {
     // 后端路由为 /tasks/sessions/:uuid/events，路径中不带 taskUuid；
     // 多带段会命中 404，导致任务完成后回看「执行过程」为空。
-    const result = await apiClient.get<{ items: SessionEventItem[] }>(
-      `/tasks/sessions/${encodeURIComponent(props.sessionUuid)}/events`,
-      { after_sequence: maxSequence() },
+    const result = await apiClient.get<{ items: SessionEventItem[]; activity?: { kind?: string } }>(
+      `/tasks/sessions/${encodeURIComponent(sessionUuid)}/events`,
+      { after_sequence: historyCursor },
     )
+    if (sessionUuid !== props.sessionUuid) return
+    if (result.activity?.kind) activityHint.value = result.activity.kind
     mergeEvents(result.items || [])
+    historyCursor = (result.items || []).reduce((cursor, item) => Math.max(cursor, item.sequence), historyCursor)
     historyLoaded.value = true
   } catch (error) {
     // 历史加载失败不阻塞实时事件展示；保留 historyLoaded=false，
@@ -649,9 +732,24 @@ function subscribe() {
     type: 'executor.subscribe',
     task_uuid: props.taskUuid,
     session_uuid: props.sessionUuid,
-    after_sequence: maxSequence(),
+    after_sequence: historyCursor,
   })
 }
+
+watch(() => props.sessionUuid, (sessionUuid, previous) => {
+  if (previous && !props.readOnly) wsSend({ type: 'executor.unsubscribe', session_uuid: previous })
+  clearTimeout(collapseTimer)
+  historyCursor = 0
+  historyLoaded.value = false
+  events.value = []
+  liveSequences.value = new Set()
+  fullBySequence.value = new Map()
+  activityHint.value = ''
+  if (sessionUuid && !props.readOnly) {
+    void loadHistory()
+    if (running.value) subscribe()
+  }
+})
 
 const connected = useLocalWSStatus()
 
@@ -675,8 +773,10 @@ watch(
     }
     // 运行结束后自动收起，让最终输出成为焦点
     if (prev === 'running' && status && status !== 'running' && status !== 'created') {
+      void loadHistory()
       wsSend({ type: 'executor.unsubscribe', session_uuid: props.sessionUuid })
-      window.setTimeout(() => {
+      clearTimeout(collapseTimer)
+      collapseTimer = setTimeout(() => {
         expanded.value = false
       }, 1000)
     }
@@ -691,10 +791,13 @@ interface ExecutorEventPayload {
   tool_use_id?: string
   permission_requests?: PermissionRequestPayload[]
   timestamp?: number
+  tool_result_interrupted?: boolean
+  interrupted_attempt?: number
+  activity?: { kind?: string }
   [key: string]: unknown
 }
 
-onMessage('executor.event', (payload: Record<string, unknown>) => {
+const unsubscribeEvents = onMessage('executor.event', (payload: Record<string, unknown>) => {
   if (props.readOnly) return
   const sessionUuid = String(payload?.session_uuid || '')
   if (!sessionUuid || sessionUuid !== props.sessionUuid) return
@@ -703,6 +806,14 @@ onMessage('executor.event', (payload: Record<string, unknown>) => {
     typeof raw === 'string' ? (JSON.parse(raw) as ExecutorEventPayload) : (raw as ExecutorEventPayload)
   const sequence = Number(payload.sequence || 0)
   if (!event || !sequence) return
+  if (event.type === 'activity') {
+    activityHint.value = String(event.content || event.activity?.kind || '')
+    if (activityHint.value === 'resumed') activityHint.value = ''
+    return
+  }
+  if (event.type === 'thinking' || event.type === 'message' || event.type === 'tool_call' || event.type === 'tool_result') {
+    activityHint.value = ''
+  }
   mergeEvents([
     {
       session_uuid: sessionUuid,
@@ -714,6 +825,8 @@ onMessage('executor.event', (payload: Record<string, unknown>) => {
         timestamp: event.timestamp,
         session_id: typeof event.session_id === 'string' ? event.session_id : undefined,
         tool_use_id: typeof event.tool_use_id === 'string' ? event.tool_use_id : undefined,
+        tool_result_interrupted: event.tool_result_interrupted === true,
+        interrupted_attempt: typeof event.interrupted_attempt === 'number' ? event.interrupted_attempt : undefined,
         permission_requests: Array.isArray(event.permission_requests)
           ? event.permission_requests
           : undefined,
@@ -797,6 +910,21 @@ function toggleExpanded() {
 }
 .exec-summary-state.is-failed {
   color: #dc2626;
+}
+.exec-summary-state.is-interrupted,
+.exec-row-state.is-interrupted {
+  color: #b45309;
+}
+.exec-interrupt-hint,
+.exec-full-link {
+  margin: 4px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #8b8b8b;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
 }
 
 /* 时间线：无边框无底色，仅靠缩进与图标分层。

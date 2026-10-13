@@ -2,7 +2,13 @@
   <aside
     v-show="!sidebarCollapsed"
     class="app-sidebar"
-    :class="{ 'theme-dark': isDark, 'mac-desktop': isMacDesktop, 'windows-desktop': isWindowsDesktop }"
+    :class="{
+      'theme-dark': isDark,
+      'mac-desktop': isMacDesktop,
+      'windows-desktop': isWindowsDesktop,
+      'is-resizing': sidebarResizing,
+    }"
+    :style="{ '--app-sidebar-width': `${sidebarWidth}px` }"
   >
     <div class="sidebar-top-bar">
       <button
@@ -27,7 +33,7 @@
         :src="isDark ? logoDark : logo"
         alt="Logo"
       />
-      <span class="brand-name">TeamsBoard</span>
+      <span class="brand-name">TeamBuddy</span>
     </div>
 
     <!-- 顶部主导航菜单 -->
@@ -44,7 +50,7 @@
 
       <!-- 看板 -->
       <RouterLink
-        to="/board"
+        :to="boardReturnPath"
         class="nav-item"
         :class="{ active: activeKey === 'workflows' }"
       >
@@ -201,8 +207,10 @@
             />
             <FolderOutlined class="group-folder-icon" />
             <span class="group-name">{{ group.displayName }}</span>
+            <PushpinOutlined v-if="group.pinnedAt" class="group-pin" :aria-label="t('layout.sidebar.pinWorkspace')" />
           </div>
 
+          <WorkspaceActions :group="group" />
           <a-tooltip :title="t('layout.sidebar.addConversationInDir') || '在此目录新增对话'">
             <button
               type="button"
@@ -238,29 +246,45 @@
                 :title="t('workflows.task.common.unread')"
               />
 
-              <!-- 悬停更多操作按钮 -->
-              <a-dropdown
-                :trigger="['click']"
-                placement="bottomRight"
-              >
-                <button
-                  type="button"
-                  class="conv-more-btn"
-                  @click.stop
+              <!-- 运行状态与更多操作共用一个位置：默认显示 loading，悬浮时切换为更多。 -->
+              <span class="conv-action-slot">
+                <LoadingOutlined
+                  v-if="conv.running"
+                  class="conversation-running"
+                  spin
+                  :title="t('layout.sidebar.conversationRunning')"
+                />
+                <a-dropdown
+                  :trigger="['click']"
+                  placement="bottomRight"
                 >
-                  <EllipsisOutlined />
-                </button>
-                <template #overlay>
-                  <a-menu>
-                    <a-menu-item @click="toggleReadState(conv)">
-                      {{ conv.unread ? (t('workflows.task.common.markRead') || '标为已读') : (t('workflows.task.common.markUnread') || '设为未读') }}
-                    </a-menu-item>
-                    <a-menu-item @click="toggleArchiveState(conv)">
-                      {{ t('workflows.task.common.archive') || '归档' }}
-                    </a-menu-item>
-                  </a-menu>
-                </template>
-              </a-dropdown>
+                  <button
+                    type="button"
+                    class="conv-more-btn"
+                    :aria-label="t('layout.sidebar.more')"
+                    @click.stop
+                  >
+                    <EllipsisOutlined />
+                  </button>
+                  <template #overlay>
+                    <a-menu>
+                      <a-menu-item @click="toggleReadState(conv)">
+                        {{ conv.unread ? (t('workflows.task.common.markRead') || '标为已读') : (t('workflows.task.common.markUnread') || '设为未读') }}
+                      </a-menu-item>
+                      <a-menu-item @click="toggleArchiveState(conv)">
+                        {{ t('workflows.task.common.archive') || '归档' }}
+                      </a-menu-item>
+                      <a-menu-item :disabled="taskActionPending" @click="openRename(conv)">
+                        {{ t('layout.sidebar.renameTask') }}
+                      </a-menu-item>
+                      <a-menu-divider />
+                      <a-menu-item danger :disabled="taskActionPending" @click="confirmDelete(conv)">
+                        {{ t('common.actions.delete') }}
+                      </a-menu-item>
+                    </a-menu>
+                  </template>
+                </a-dropdown>
+              </span>
             </div>
           </div>
         </div>
@@ -308,6 +332,7 @@
                 <FolderOutlined class="group-folder-icon" />
                 <span class="group-name">{{ group.displayName }}</span>
               </div>
+              <WorkspaceActions :group="group" />
             </div>
 
             <div
@@ -334,6 +359,7 @@
                     <button
                       type="button"
                       class="conv-more-btn"
+                      :aria-label="t('layout.sidebar.more')"
                       @click.stop
                     >
                       <EllipsisOutlined />
@@ -345,6 +371,13 @@
                         </a-menu-item>
                         <a-menu-item @click="toggleArchiveState(conv)">
                           {{ t('layout.sidebar.unarchive') || '取消归档' }}
+                        </a-menu-item>
+                        <a-menu-item :disabled="taskActionPending" @click="openRename(conv)">
+                          {{ t('layout.sidebar.renameTask') }}
+                        </a-menu-item>
+                        <a-menu-divider />
+                        <a-menu-item danger :disabled="taskActionPending" @click="confirmDelete(conv)">
+                          {{ t('common.actions.delete') }}
                         </a-menu-item>
                       </a-menu>
                     </template>
@@ -367,7 +400,7 @@
           <UserOutlined />
         </div>
         <div class="user-text">
-          <span class="user-title">{{ authStore.cloudLoggedIn ? (authStore.cloudUser?.displayName || authStore.cloudUser?.username || '已登录') : (t('layout.sidebar.notLoggedIn') || '未登录') }}</span>
+          <span class="user-title">{{ userNickname }}</span>
           <span class="user-sub">{{ authStore.cloudLoggedIn ? (authStore.cloudUser?.username || 'GoTeams') : (t('layout.sidebar.guestLogin') || '本地 · 点击登录') }}</span>
         </div>
       </div>
@@ -395,15 +428,22 @@
             @click.stop
           >
             <!-- 用户状态行 -->
-            <div class="menu-user-row">
+            <button
+              type="button"
+              class="menu-user-row"
+              :disabled="browserLoginPending"
+              :aria-busy="browserLoginPending"
+              @click="handleUserClick"
+            >
               <div class="user-avatar small">
-                <UserOutlined />
+                <LoadingOutlined v-if="browserLoginPending" spin />
+                <UserOutlined v-else />
               </div>
               <div class="user-text">
-                <span class="user-title">{{ authStore.cloudLoggedIn ? (authStore.cloudUser?.displayName || authStore.cloudUser?.username) : (t('layout.sidebar.notLoggedIn') || '未登录') }}</span>
+                <span class="user-title">{{ userNickname }}</span>
                 <span class="user-sub">{{ authStore.cloudLoggedIn ? (authStore.cloudUser?.username || '') : (t('layout.sidebar.guestLogin') || '本地 · 点击登录') }}</span>
               </div>
-            </div>
+            </button>
 
             <div class="menu-divider" />
 
@@ -523,15 +563,57 @@
         </template>
       </a-dropdown>
     </footer>
+    <a-modal
+      :open="renameTaskUuid !== ''"
+      :title="t('layout.sidebar.renameTask')"
+      :ok-text="t('common.actions.save')"
+      :cancel-text="t('common.actions.cancel')"
+      :confirm-loading="taskActionPending"
+      :ok-button-props="{ disabled: taskActionPending }"
+      :cancel-button-props="{ disabled: taskActionPending }"
+      :closable="!taskActionPending"
+      :mask-closable="!taskActionPending"
+      :keyboard="!taskActionPending"
+      @ok="submitRename"
+      @cancel="renameTaskUuid = ''"
+    >
+      <a-form layout="vertical">
+        <a-form-item
+          :label="t('layout.sidebar.taskName')"
+          :validate-status="renameError ? 'error' : undefined"
+          :help="renameError"
+        >
+          <a-input
+            v-model:value="renameTitle"
+            autofocus
+            :disabled="taskActionPending"
+            @press-enter="submitRename"
+          />
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
+    <div
+      class="sidebar-resize-handle"
+      role="separator"
+      tabindex="0"
+      aria-orientation="vertical"
+      :aria-valuemin="SIDEBAR_MIN_WIDTH"
+      :aria-valuemax="SIDEBAR_MAX_WIDTH"
+      :aria-valuenow="sidebarWidth"
+      @pointerdown="startSidebarResize"
+      @keydown="handleSidebarResizeKeydown"
+    />
   </aside>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import {
   EllipsisOutlined,
+  PushpinOutlined,
   RightOutlined,
   SearchOutlined,
   CloseCircleFilled,
@@ -545,8 +627,14 @@ import {
   LogoutOutlined,
   CheckOutlined,
   CompassOutlined,
+  LoadingOutlined,
 } from '@ant-design/icons-vue'
-import { useAppStore } from '@/stores/app'
+import {
+  SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  useAppStore,
+} from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useConversationStore, type TaskConversation } from '@/stores/conversation'
 import { useAppI18n } from '@/i18n'
@@ -560,6 +648,7 @@ import logoDark from '@/assets/logo-dark.svg'
 import sidebarToggleDark from '@/assets/icons/sidebar-toggle-dark.svg'
 import sidebarToggleLight from '@/assets/icons/sidebar-toggle-light.svg'
 import SidebarMenuIcon from './SidebarMenuIcon.vue'
+import WorkspaceActions from './WorkspaceActions.vue'
 
 type ThemeMode = 'light' | 'dark' | 'auto'
 
@@ -568,6 +657,22 @@ const router = useRouter()
 const appStore = useAppStore()
 const authStore = useAuthStore()
 const conversationStore = useConversationStore()
+const boardReturnPath = ref('/board')
+const boardAccountScope = computed(() => {
+  const user = authStore.cloudUser
+  return authStore.cloudLoggedIn && user
+    ? user.accountScope || `legacy:${user.id}:${user.username}`
+    : 'local'
+})
+watch(boardAccountScope, () => {
+  boardReturnPath.value = '/board'
+})
+watch(() => route.fullPath, (path) => {
+  // 保留本次应用会话的看板返回位置；主动返回看板时自然替换任务详情位置。
+  if (route.name === 'board' || route.name === 'board-task-detail' || route.name === 'workflows-task-detail') {
+    boardReturnPath.value = path
+  }
+}, { immediate: true })
 const { t } = useAppI18n()
 const { replay: replayOnboarding } = useOnboardingGuide()
 const { locale, setLocale } = useLocale()
@@ -579,10 +684,25 @@ const {
 
 const searchKeyword = ref('')
 const settingsMenuOpen = ref(false)
+const renameTaskUuid = ref('')
+const renameTitle = ref('')
+const renameError = ref('')
+const taskActionPending = ref(false)
+const sidebarResizing = ref(false)
+let sidebarResizeStartX = 0
+let sidebarResizeStartWidth = 0
+let previousBodyCursor = ''
+let previousBodyUserSelect = ''
 
 const sidebarCollapsed = computed(() => appStore.sidebarCollapsed)
+const sidebarWidth = computed(() => appStore.sidebarWidth)
 const isMacDesktop = isMacDesktopRuntime()
 const isWindowsDesktop = isWindowsDesktopRuntime()
+const userNickname = computed(() => {
+  if (!authStore.cloudLoggedIn) return t('layout.sidebar.notLoggedIn') || '未登录'
+  return authStore.cloudUser?.displayName?.trim()
+    || '已登录'
+})
 
 function readThemePreference(): ThemeMode {
   try {
@@ -601,6 +721,62 @@ const systemDark = ref(
 
 let mediaQueryListener: ((e: MediaQueryListEvent) => void) | null = null
 
+function openRename(conv: TaskConversation) {
+  if (taskActionPending.value) return
+  renameTaskUuid.value = conv.task_uuid
+  renameTitle.value = conv.title
+  renameError.value = ''
+}
+
+async function submitRename() {
+  if (taskActionPending.value || !renameTaskUuid.value) return
+  const title = renameTitle.value.trim()
+  if (!title || /[\r\n]/.test(title) || Array.from(title).length > 200) {
+    renameError.value = t('layout.sidebar.taskNameInvalid')
+    return
+  }
+  taskActionPending.value = true
+  try {
+    await conversationStore.renameTask(renameTaskUuid.value, title)
+    renameTaskUuid.value = ''
+    message.success(t('layout.sidebar.taskRenamed'))
+  } catch (err) {
+    renameError.value = err instanceof Error ? err.message : t('layout.sidebar.taskRenameFailed')
+  } finally {
+    taskActionPending.value = false
+  }
+}
+
+function confirmDelete(conv: TaskConversation) {
+  if (taskActionPending.value) return
+  // Capture the task, so navigation while the confirmation is open cannot
+  // change which task is deleted.
+  const taskUuid = conv.task_uuid
+  Modal.confirm({
+    title: t('layout.sidebar.deleteTaskConfirm', { title: conv.title }),
+    content: t('layout.sidebar.deleteTaskWarning'),
+    okText: t('common.actions.delete'),
+    okType: 'danger',
+    cancelText: t('common.actions.cancel'),
+    onOk: async () => {
+      if (taskActionPending.value) return Promise.reject()
+      taskActionPending.value = true
+      try {
+        await conversationStore.deleteTask(taskUuid)
+        message.success(t('workflows.task.detail.deleted'))
+        if (route.query.taskUuid === taskUuid) {
+          await router.replace({ name: 'tasks-new' })
+        }
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : t('workflows.task.detail.deleteFailed'))
+        throw err
+      } finally {
+        taskActionPending.value = false
+      }
+    },
+  })
+}
+
 onMounted(() => {
   if (typeof window !== 'undefined') {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
@@ -615,6 +791,7 @@ onUnmounted(() => {
   if (mediaQueryListener && typeof window !== 'undefined') {
     window.matchMedia('(prefers-color-scheme: dark)').removeEventListener('change', mediaQueryListener)
   }
+  finishSidebarResize()
 })
 
 const isDark = computed(() => {
@@ -663,6 +840,52 @@ function collapseSidebar() {
   appStore.setSidebarCollapsed(true)
 }
 
+function updateSidebarWidth(event: PointerEvent) {
+  appStore.setSidebarWidth(
+    sidebarResizeStartWidth + event.clientX - sidebarResizeStartX,
+    false,
+  )
+}
+
+function finishSidebarResize() {
+  if (!sidebarResizing.value) return
+  sidebarResizing.value = false
+  window.removeEventListener('pointermove', updateSidebarWidth)
+  window.removeEventListener('pointerup', finishSidebarResize)
+  window.removeEventListener('pointercancel', finishSidebarResize)
+  document.body.style.cursor = previousBodyCursor
+  document.body.style.userSelect = previousBodyUserSelect
+  appStore.setSidebarWidth(sidebarWidth.value)
+}
+
+function startSidebarResize(event: PointerEvent) {
+  if (event.button !== 0 || sidebarResizing.value) return
+  event.preventDefault()
+  sidebarResizing.value = true
+  sidebarResizeStartX = event.clientX
+  sidebarResizeStartWidth = sidebarWidth.value
+  previousBodyCursor = document.body.style.cursor
+  previousBodyUserSelect = document.body.style.userSelect
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('pointermove', updateSidebarWidth)
+  window.addEventListener('pointerup', finishSidebarResize)
+  window.addEventListener('pointercancel', finishSidebarResize)
+}
+
+function handleSidebarResizeKeydown(event: KeyboardEvent) {
+  const step = event.shiftKey ? 20 : 10
+  let nextWidth = sidebarWidth.value
+  if (event.key === 'ArrowLeft') nextWidth -= step
+  else if (event.key === 'ArrowRight') nextWidth += step
+  else if (event.key === 'Home') nextWidth = SIDEBAR_MIN_WIDTH
+  else if (event.key === 'End') nextWidth = SIDEBAR_MAX_WIDTH
+  else if (event.key === 'Escape') nextWidth = SIDEBAR_DEFAULT_WIDTH
+  else return
+  event.preventDefault()
+  appStore.setSidebarWidth(nextWidth)
+}
+
 function chooseTheme(mode: ThemeMode) {
   currentThemeConfig.value = mode
   try {
@@ -691,6 +914,7 @@ function handleUserClick() {
     return
   }
   if (browserLoginPending.value) return
+  settingsMenuOpen.value = false
   message.info(t('teamwork.login.pending'))
   void startBrowserLogin().then((ok) => {
     if (!ok && browserLoginError.value) message.error(browserLoginError.value)
@@ -767,8 +991,10 @@ onMounted(() => {
   --sidebar-hover: #f0f0f0;
   --sidebar-active: #e9e9eb;
   --sidebar-item-radius: 8px;
-  width: 280px;
-  min-width: 280px;
+  position: relative;
+  width: var(--app-sidebar-width, 280px);
+  min-width: var(--app-sidebar-width, 280px);
+  flex-basis: var(--app-sidebar-width, 280px);
   height: 100vh;
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-border);
@@ -777,6 +1003,35 @@ onMounted(() => {
   user-select: none;
   overflow: hidden;
   transition: background-color 0.2s;
+}
+
+.sidebar-resize-handle {
+  -webkit-app-region: no-drag;
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  outline: none;
+}
+
+.sidebar-resize-handle::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  content: '';
+  transition: background 0.15s;
+}
+
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:focus-visible::after,
+.app-sidebar.is-resizing .sidebar-resize-handle::after {
+  background: #3157e2;
 }
 
 .app-sidebar.theme-dark {
@@ -805,6 +1060,8 @@ onMounted(() => {
 
 .windows-desktop .sidebar-top-bar {
   -webkit-app-region: drag;
+  height: env(titlebar-area-height, 32px);
+  border-bottom: 1px solid #e5e7eb;
 }
 
 .sidebar-collapse-btn {
@@ -841,6 +1098,7 @@ onMounted(() => {
 .brand-logo {
   width: 24px;
   height: 24px;
+  flex: 0 0 24px;
 }
 
 .brand-name {
@@ -860,7 +1118,7 @@ onMounted(() => {
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   height: 32px;
   padding: 0 10px;
   border-radius: var(--sidebar-item-radius);
@@ -881,8 +1139,13 @@ onMounted(() => {
 }
 
 .nav-icon {
-  font-size: 16px;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  font-size: 18px;
 }
 
 .nav-label {
@@ -899,11 +1162,11 @@ onMounted(() => {
 .more-item__left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .ellipsis-icon {
-  font-size: 16px;
+  font-size: 18px;
 }
 
 .more-chevron {
@@ -1083,6 +1346,11 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.group-pin {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
 .group-add-btn {
   opacity: 0;
   width: 20px;
@@ -1149,6 +1417,27 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
+.conv-action-slot {
+  position: relative;
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+}
+
+.conversation-running {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #3157e2;
+  font-size: 13px;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
 .unread-dot {
   width: 7px;
   height: 7px;
@@ -1157,6 +1446,8 @@ onMounted(() => {
 }
 
 .conv-more-btn {
+  position: absolute;
+  inset: 0;
   opacity: 0;
   width: 18px;
   height: 18px;
@@ -1173,6 +1464,10 @@ onMounted(() => {
 
 .conversation-entry:hover .conv-more-btn {
   opacity: 1;
+}
+
+.conversation-entry:hover .conversation-running {
+  opacity: 0;
 }
 
 .conv-more-btn:hover {
@@ -1333,6 +1628,25 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 4px 6px 8px;
+  width: 100%;
+  border: none;
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.menu-user-row:hover,
+.menu-user-row:focus-visible {
+  background: #f5f5f5;
+  outline: none;
+}
+
+.menu-user-row:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .menu-divider {

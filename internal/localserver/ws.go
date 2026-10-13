@@ -30,6 +30,8 @@ var wsUpgrader = websocket.Upgrader{
 // wsWriteTimeout is the timeout for a single write to the local browser connection.
 const wsWriteTimeout = 10 * time.Second
 
+const wsQueueBytes = 4 << 20
+
 // PushFunc push function signature: returns the push type and data, and returns nil to indicate that no push is required in this round.
 type PushFunc func() (pushType string, data interface{})
 
@@ -54,7 +56,12 @@ type wsClient struct {
 	// 旧协议一次只订阅一个 session，动态区与执行窗口可能同时订阅不同
 	// session，因此改为集合，保持互不覆盖。
 	subscribedSessions map[string]bool
-	writeMu            sync.Mutex
+	queueMu            sync.Mutex
+	queuedBytes        int
+	send               chan []byte
+	done               chan struct{}
+	space              chan struct{}
+	closeOnce          sync.Once
 }
 
 // NewWSHub creates a WebSocket manager
@@ -149,7 +156,7 @@ func (h *WSHub) BroadcastToAll(msgType string, data interface{}) {
 			h.mu.Lock()
 			delete(h.clients, c.conn)
 			h.mu.Unlock()
-			c.conn.Close()
+			c.close()
 		}
 	}
 }
@@ -213,11 +220,11 @@ func (h *WSHub) Close() {
 	h.clients = make(map[*websocket.Conn]*wsClient)
 	h.mu.Unlock()
 
-	// The close frame must also go through writeMu: the broadcast goroutine may still hold the old client reference and be writing.
+	// 控制帧可与唯一的数据帧写协程并发。
 	for _, c := range clients {
 		_ = writeClientControl(c, websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "账号会话已切换"))
-		c.conn.Close()
+		c.close()
 	}
 }
 
@@ -256,19 +263,20 @@ func (h *WSHub) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
-	client := &wsClient{conn: conn}
+	client := &wsClient{conn: conn, send: make(chan []byte, 256), done: make(chan struct{}), space: make(chan struct{}, 1)}
 	h.mu.Lock()
 	h.clients[conn] = client
 	h.mu.Unlock()
 
 	// The Ping handler must be registered before the read loop starts:
 	// 1. Registering it after ReadMessage races with the read goroutine for the conn's handler field;
-	// 2. Pong is sent by the read goroutine concurrently with the broadcast goroutine, so they must share writeMu.
+	// 2. Pong 使用允许并发的 WriteControl，不阻塞业务事件入队。
 	conn.SetPingHandler(func(appData string) error {
 		return writeClientControl(client, websocket.PongMessage, nil)
 	})
 
 	// read loop
+	go client.writeLoop()
 	go h.readLoop(conn, client)
 }
 
@@ -278,7 +286,7 @@ func (h *WSHub) readLoop(conn *websocket.Conn, client *wsClient) {
 		h.mu.Lock()
 		delete(h.clients, conn)
 		h.mu.Unlock()
-		conn.Close()
+		client.close()
 	}()
 
 	for {
@@ -299,6 +307,7 @@ func (h *WSHub) readLoop(conn *websocket.Conn, client *wsClient) {
 
 		switch msg.Type {
 		case "executor.subscribe":
+			h.mu.Lock()
 			client.taskUUID = msg.TaskUUID
 			if client.subscribedSessions == nil {
 				client.subscribedSessions = make(map[string]bool)
@@ -306,8 +315,10 @@ func (h *WSHub) readLoop(conn *websocket.Conn, client *wsClient) {
 			if msg.SessionUUID != "" {
 				client.subscribedSessions[msg.SessionUUID] = true
 			}
+			h.mu.Unlock()
 			h.backfillEvents(client, msg.SessionUUID, msg.AfterSeq)
 		case "executor.unsubscribe":
+			h.mu.Lock()
 			// 带 session_uuid 时只退订该会话（动态区与执行窗口可能同时
 			// 订阅不同 session），不带则清空全部订阅，保持旧协议语义。
 			if msg.SessionUUID != "" && client.subscribedSessions != nil {
@@ -316,6 +327,7 @@ func (h *WSHub) readLoop(conn *websocket.Conn, client *wsClient) {
 				client.taskUUID = ""
 				client.subscribedSessions = nil
 			}
+			h.mu.Unlock()
 		}
 	}
 }
@@ -340,7 +352,7 @@ func (h *WSHub) backfillEvents(client *wsClient, sessionUUID string, afterSeq in
 			"event_type":   event.EventType,
 			"event":        json.RawMessage(event.Payload),
 		}
-		if err := writeClientJSON(client, msg); err != nil {
+		if err := queueClientJSON(client, msg, true); err != nil {
 			return
 		}
 	}
@@ -371,7 +383,7 @@ func (h *WSHub) BroadcastEvent(sessionUUID string, sequence int, event executor.
 			h.mu.Lock()
 			delete(h.clients, c.conn)
 			h.mu.Unlock()
-			c.conn.Close()
+			c.close()
 		}
 	}
 }
@@ -400,7 +412,7 @@ func (h *WSHub) BroadcastStateChanged(taskUUID, stepKey, sessionUUID, status str
 			h.mu.Lock()
 			delete(h.clients, c.conn)
 			h.mu.Unlock()
-			c.conn.Close()
+			c.close()
 		}
 	}
 
@@ -414,18 +426,86 @@ func (h *WSHub) BroadcastStateChanged(taskUUID, stepKey, sessionUUID, status str
 }
 
 func writeClientJSON(client *wsClient, value interface{}) error {
-	client.writeMu.Lock()
-	defer client.writeMu.Unlock()
-	_ = client.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-	return client.conn.WriteJSON(value)
+	return queueClientJSON(client, value, false)
 }
 
-// writeClientControl sends control frames (Pong / Close) under lock.
-// gorilla/websocket explicitly forbids concurrent writes to the same connection; all write paths must go through client.writeMu,
-// otherwise the Ping handler (read goroutine) and the broadcast / close paths would cause concurrent write panics or frame interleaving.
+func queueClientJSON(client *wsClient, value interface{}, wait bool) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	// 每连接独立且有界的发送队列，慢窗口不能反压 CLI 或拖住其他窗口。
+	var deadline <-chan time.Time
+	if wait {
+		timer := time.NewTimer(wsWriteTimeout)
+		defer timer.Stop()
+		deadline = timer.C
+	}
+	for {
+		client.queueMu.Lock()
+		select {
+		case <-client.done:
+			client.queueMu.Unlock()
+			return fmt.Errorf("websocket closed")
+		default:
+		}
+		if client.queuedBytes+len(data) <= wsQueueBytes {
+			select {
+			case client.send <- data:
+				client.queuedBytes += len(data)
+				client.queueMu.Unlock()
+				return nil
+			default:
+			}
+		}
+		client.queueMu.Unlock()
+		if !wait || len(data) > wsQueueBytes {
+			break
+		}
+		// 历史补发在本连接读取协程等待空间，不阻塞执行事件生产者。
+		select {
+		case <-client.done:
+			return fmt.Errorf("websocket closed")
+		case <-deadline:
+			client.close()
+			return fmt.Errorf("websocket backfill timed out")
+		case <-client.space:
+		}
+	}
+	client.close()
+	return fmt.Errorf("websocket send queue full")
+}
+
+func (client *wsClient) close() {
+	client.closeOnce.Do(func() {
+		close(client.done)
+		_ = client.conn.Close()
+	})
+}
+
+func (client *wsClient) writeLoop() {
+	defer client.close()
+	for {
+		select {
+		case <-client.done:
+			return
+		case data := <-client.send:
+			client.queueMu.Lock()
+			client.queuedBytes -= len(data)
+			client.queueMu.Unlock()
+			select {
+			case client.space <- struct{}{}:
+			default:
+			}
+			_ = client.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+			if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// WriteControl 可与数据帧并发，Pong 不等待发送队列中的业务消息。
 func writeClientControl(client *wsClient, messageType int, data []byte) error {
-	client.writeMu.Lock()
-	defer client.writeMu.Unlock()
-	_ = client.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-	return client.conn.WriteMessage(messageType, data)
+	return client.conn.WriteControl(messageType, data, time.Now().Add(wsWriteTimeout))
 }

@@ -123,18 +123,29 @@
             </div>
           </div>
 
-          <div v-if="!loading && filteredRows.length === 0" class="empty-state">
+          <div v-if="!loading && filteredRows.length === 0" class="empty-state" role="status">
             <EmptyIssueIcon class="empty-icon" aria-hidden="true" />
-            <span>{{ t('common.states.noData') }}</span>
+            <span>{{ searchKeyword ? t('workflows.board.noMatchingTasks') : t('common.states.noData') }}</span>
           </div>
         </div>
       </div>
     </ASpin>
+    <APagination
+      v-if="total !== undefined && total > pageSize"
+      class="list-pagination"
+      :current="page"
+      :page-size="pageSize"
+      :total="total"
+      :show-size-changer="false"
+      :disabled="loading"
+      @change="emit('page-change', $event)"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, watch } from 'vue'
+import { Pagination as APagination } from 'ant-design-vue'
 import {
   AlertOutlined,
   CheckOutlined,
@@ -156,53 +167,71 @@ import EmptyIssueIcon from './EmptyIssueIcon.vue'
 const props = withDefaults(defineProps<{
   rows: BoardListRow[]
   filters: BoardListFilter[]
+  filtersReady?: boolean
   loading?: boolean
   defaultStatus?: string
   rowClickable?: boolean
+  searchKeyword?: string
+  statusCounts?: Record<string, number>
+  total?: number
+  page?: number
+  pageSize?: number
 }>(), {
   loading: false,
+  filtersReady: true,
   defaultStatus: 'active',
   rowClickable: false,
+  searchKeyword: '',
+  page: 1,
+  pageSize: 20,
 })
 
 const emit = defineEmits<{
   action: [row: BoardListRow, action: BoardListActionKind]
   'row-click': [row: BoardListRow]
+  'page-change': [page: number]
 }>()
 
 const { t } = useAppI18n()
 const { locale } = useLocale()
-const selectedStatus = ref(props.defaultStatus)
-const statusSelectedByUser = ref(false)
+const selectedStatus = defineModel<string>('statusFilter', { default: 'active' })
+const searchKeyword = computed(() => props.searchKeyword.trim().toLowerCase())
+const searchedRows = computed(() => (
+  searchKeyword.value
+    ? props.rows.filter((row) => row.title.toLowerCase().includes(searchKeyword.value))
+    : props.rows
+))
 
 const filterOptions = computed(() => [
   {
     key: 'all',
     label: t('workflows.board.allStatuses'),
-    count: props.rows.length,
+    count: props.statusCounts
+      ? Object.values(props.statusCounts).reduce((sum, count) => sum + count, 0)
+      : searchedRows.value.length,
   },
   ...props.filters.map((filter) => ({
     key: filter.key,
     label: filter.label,
-    count: props.rows.filter((row) => row.status === filter.key).length,
+    count: props.statusCounts
+      ? props.statusCounts[filter.key] || 0
+      : searchedRows.value.filter((row) => row.status === filter.key).length,
   })),
 ])
 
-const filteredRows = computed(() => (
-  selectedStatus.value === 'all'
-    ? props.rows
-    : props.rows.filter((row) => row.status === selectedStatus.value)
-))
+const filteredRows = computed(() => {
+  if (props.statusCounts) return props.rows
+  return selectedStatus.value === 'all'
+    ? searchedRows.value
+    : searchedRows.value.filter((row) => row.status === selectedStatus.value)
+})
 
 watch(
-  () => props.filters.map((filter) => filter.key),
-  (keys) => {
-    if (keys.length === 0) return
-    if (!statusSelectedByUser.value && keys.includes(props.defaultStatus)) {
-      selectedStatus.value = props.defaultStatus
-      return
-    }
-    if (selectedStatus.value !== 'all' && !keys.includes(selectedStatus.value)) {
+  [() => props.filters.map((filter) => filter.key), () => props.loading, () => props.filtersReady, selectedStatus],
+  ([keys, loading, ready, status]) => {
+    // 等待异步泳道加载后再校验，避免把尚未出现的已保存状态当成失效。
+    if (loading || !ready) return
+    if (status !== 'all' && !keys.includes(status)) {
       selectedStatus.value = keys.includes(props.defaultStatus) ? props.defaultStatus : 'all'
     }
   },
@@ -210,7 +239,6 @@ watch(
 )
 
 function selectStatus(status: string) {
-  statusSelectedByUser.value = true
   selectedStatus.value = status
 }
 
@@ -314,6 +342,8 @@ function dateTimeValue(value?: number | string) {
   min-height: 0;
   flex: 1;
 }
+
+.list-pagination { flex: 0 0 auto; align-self: flex-end; padding-top: 16px; }
 
 .list-spinner :deep(.ant-spin-container),
 .list-spinner :deep(.ant-spin-nested-loading) {

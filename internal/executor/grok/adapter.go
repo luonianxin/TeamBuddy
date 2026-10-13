@@ -19,8 +19,8 @@
 // 需要单独实现（含权限应答与取消处理），故当前未启用其发现项
 // （见 discovery.go 中 CLITypeGrok 的注释），待 ACP 适配落地后再放开。
 //
-// 另注：官方 grok 安装器会把 `~/.grok/bin/agent` 软链到 `~/.local/bin/agent`，
-// 与 Cursor Agent CLI 的 `agent` 命令名冲突（Cursor 侧改用 `cursor-agent` 规避）。
+// 另注：Grok 与官方 Cursor CLI 都使用命令名 agent。Cursor 只认其安装包里的 agent，
+// 不能把 ~/.grok/bin/agent 当成 Cursor。
 package grok
 
 import (
@@ -270,3 +270,6 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// LooseTerminal 表示本解码器的 TerminalSeen 只代表「有过输出」，不能据此提前结束本轮。
+func (d *Decoder) LooseTerminal() bool { return true }

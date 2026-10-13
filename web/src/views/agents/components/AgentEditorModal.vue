@@ -100,7 +100,7 @@
         <a-textarea
           v-model:value="form.prompt"
           :disabled="cloudLocked"
-          :maxlength="2000"
+          :maxlength="10000"
           :placeholder="t('agents.promptPlaceholder')"
         />
       </a-form-item>
@@ -281,7 +281,6 @@ async function initialiseForm() {
 	form.cli_type = agent?.cli_type || ''
 	form.model = props.expertMember?.model_name || (props.step ? stepModel(props.step) : '')
   await detectCli(false)
-  await loadModels(form.cli_type, form.model)
 }
 
 function openFilePicker() {
@@ -318,31 +317,33 @@ function cliOptionLabel(cli: DiscoveredCLI) {
 async function detectCli(showSuccess = true) {
   cliLoading.value = true
   try {
-    const result = await apiClient.get<{ items: DiscoveredCLI[] }>('/tasks/cli-discovery')
+    const result = await apiClient.get<{ items: DiscoveredCLI[] }>('/tasks/cli-discovery', { refresh: showSuccess })
     // 已安装的 CLI 排在前面，未安装的置后且不可选择
     cliOptions.value = [...(result.items || [])].sort((a, b) => Number(b.installed) - Number(a.installed))
+    // 手动检测必须同步刷新模型，而不是重新读取旧快照。
+    await loadModels(form.cli_type, form.model, showSuccess)
     if (showSuccess) message.success(t('agents.cliDetected'))
   } catch (error) {
     if (showSuccess) message.error(error instanceof Error ? error.message : t('agents.cliDetectionFailed'))
   } finally {
     cliLoading.value = false
   }
-  // 模型列表与 CLI 状态联动刷新，避免“重新检测”后仍展示旧模型
-  if (form.cli_type) {
-    await loadModels(form.cli_type, form.model)
-  }
 }
 
-async function loadModels(cliType: string, keepModel = '') {
+async function loadModels(cliType: string, keepModel = '', refresh = false) {
   const requestId = ++modelRequestId
   modelOptions.value = []
   form.model = keepModel
-  if (!cliType) return
+  if (!cliType) {
+    modelLoading.value = false
+    return
+  }
 
   modelLoading.value = true
   try {
     const result = await apiClient.get<{ models: string[] }>('/tasks/cli-models', {
       cli_type: cliType,
+      refresh,
     })
     if (requestId !== modelRequestId || cliType !== form.cli_type) return
     modelOptions.value = result.models || []

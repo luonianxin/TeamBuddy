@@ -1,14 +1,12 @@
-import codexLogo from '@/assets/icons/codex-logo.svg'
-import claudeLogo from '@/assets/icons/vibe-claude.svg'
-import codebuddyLogo from '@/assets/icons/vibe-codebuddy.svg'
-import codexCliLogo from '@/assets/icons/vibe-codex-cli.svg'
-import piLogo from '@/assets/icons/vibe-pi.svg'
-import qoderLogo from '@/assets/icons/vibe-qoder.svg'
+import codexAppLogo from '@/assets/icons/codex-logo.svg'
+import antigravityLogo from '@/assets/icons/vibe-antigravity.svg'
+import { cliLogo } from '@/composables/useCliLogo'
 
 export const VIBE_CODING_TOOLS = [
   { id: 'codex', cliType: '', launch: 'app' },
   { id: 'codex_cli', cliType: 'codex', launch: 'terminal' },
   { id: 'pi', cliType: 'pi', launch: 'terminal' },
+  { id: 'antigravity', cliType: 'antigravity', launch: 'terminal' },
   { id: 'qoder', cliType: 'qoder', launch: 'terminal' },
   { id: 'codebuddy', cliType: 'codebuddy', launch: 'terminal' },
   { id: 'claude', cliType: 'claude', launch: 'terminal' },
@@ -28,17 +26,19 @@ export function vibeToolLabelKey(tool: string) {
     : 'workflows.task.assign.vibeCodingMode'
 }
 
+// Codex 应用保留彩色应用标识；其余工具与 CLI 选择器共用同一套本地厂家图标。
 const VIBE_TOOL_LOGOS: Record<VibeCodingToolId, string> = {
-  codex: codexLogo,
-  codex_cli: codexCliLogo,
-  pi: piLogo,
-  qoder: qoderLogo,
-  codebuddy: codebuddyLogo,
-  claude: claudeLogo,
+  codex: codexAppLogo,
+  codex_cli: cliLogo('codex'),
+  pi: cliLogo('pi'),
+  antigravity: antigravityLogo,
+  qoder: cliLogo('qoder'),
+  codebuddy: cliLogo('codebuddy'),
+  claude: cliLogo('claude'),
 }
 
 export function vibeToolLogo(tool: string) {
-  return isVibeCodingTool(tool) ? VIBE_TOOL_LOGOS[tool] : codexLogo
+  return isVibeCodingTool(tool) ? VIBE_TOOL_LOGOS[tool] : codexAppLogo
 }
 
 export function readRecentVibeTool() {

@@ -5,7 +5,7 @@
 - key 使用 `业务域.模块.语义`，不使用中文原文、序号、页面位置或文件路径作为 key。
 - 跨两个以上业务域且语义完全一致的文案才进入 `common.json`，领域文案保留在对应 namespace。
 - 使用 `{name}`、`{count}` 等命名插值和 Vue I18n 复数语法，不拼接句子，不在资源中保存 HTML。
-- 用户输入、后端原样数据、Markdown 正文、命令、日志、文件路径、TeamsBoard、Agent、CLI、API、Git、SSH、Docker Compose、MySQL 和 PgSQL 不翻译。
+- 用户输入、后端原样数据、Markdown 正文、命令、日志、文件路径、TeamBuddy、Agent、CLI、API、Git、SSH、Docker Compose、MySQL 和 PgSQL 不翻译。
 - 新增模块时同时创建所有 locale 的同名文件并在 `src/i18n/messages.ts` 注册；新增语言时使用 BCP 47 code，并补齐注册表、Ant Design Vue 和 Day.js 映射。
 - 英文译文需人工审阅；翻译平台或编辑器插件只能修改 `src/locales/**/*.json`，不得生成运行时代码或提交密钥。
 

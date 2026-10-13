@@ -1,6 +1,6 @@
 import cliExecutionLogo from '@/assets/icons/task-composer-cli.svg'
 import { useCliNames } from '@/composables/useCliNames'
-import { vibeToolLabelKey } from '@/composables/useVibeCoding'
+import { vibeToolLabelKey, vibeToolLogo } from '@/composables/useVibeCoding'
 import { useAppI18n } from '@/i18n'
 import type { TaskBoardTask } from '@/types/task-board'
 
@@ -19,6 +19,7 @@ export function useTaskExecutionDisplay() {
   }
 
   function executionAvatar(task: TaskBoardTask) {
+    if (task.execution_mode === 'vibe_coding') return vibeToolLogo(task.execution_tool || '')
     if (task.execution_mode === 'cli') return cliExecutionLogo
     if (task.execution_mode === 'expert_group') return task.expert_group_avatar_snapshot || ''
     return task.pipeline_avatar_snapshot || ''

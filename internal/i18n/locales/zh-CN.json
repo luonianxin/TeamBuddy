@@ -251,6 +251,27 @@
   "auth_ticket_required": {
     "other": "缺少 ticket 参数"
   },
+  "cli_resume_interrupted": {
+    "description": "自动续跑一次后仍没有完整结束事件",
+    "other": "连接中断，未能完成这一轮。可以再发一条消息从原会话继续。"
+  },
+  "cli_resume_no_session": {
+    "description": "进程在拿到会话 ID 之前退出，无法自动续跑",
+    "other": "这一轮在拿到会话 ID 之前就断开了，无法自动继续。"
+  },
+  "cli_resume_orphan": {
+    "other": "有残留进程无法清理"
+  },
+  "cli_resume_prompt": {
+    "description": "自动续跑时发给 CLI 的提示，不进入用户气泡。Tools 是未完成工具的纯文本清单",
+    "other": "连接中断了，这是同一轮任务的自动续跑。\n以下工具调用在中断时还没有返回结果，可能执行了一部分，也可能已经执行完：\n{{.Tools}}\n这些命令的进程已经被终止，不会再继续运行。\n请先确认它们的实际结果（例如检查文件、git status、进程是否还在），不要直接重跑有副作用的命令（删除、迁移、发布、推送、安装）。然后从当前会话继续完成未完成的工作，不要重复已经完成的修改。"
+  },
+  "cli_user_stopped": {
+    "other": "用户手动终止"
+  },
+  "cli_watchdog_stalled": {
+    "other": "CLI 长时间无任何活动（进程树无 CPU/IO、无输出），已终止"
+  },
   "command_docker_command_not_allowed": {
     "other": "不允许执行的 Docker 子命令"
   },
@@ -736,11 +757,21 @@
     "other": "内置 teamsboard Skill 安装失败，Codex 功能暂不可用，请重启应用或检查日志"
   },
   "localserver_codex_skill_not_managed": {
-    "other": "检测到同名但非 TeamsBoard 管理的 teamsboard Skill，为避免覆盖，Codex 功能已禁用"
+    "other": "检测到同名但非 TeamBuddy 管理的 teamsboard Skill，为避免覆盖，Codex 功能已禁用"
   },
   "localserver_codex_task_prompt": {
-    "description": "SkillPath, TaskUUID and Tool identify the managed TeamsBoard task.",
-    "other": "[$teamsboard]({{.SkillPath}})\n\n请使用 teamsboard Skill 处理以下 TeamsBoard 本地任务。\n任务 UUID：{{.TaskUUID}}\n工具类型：{{.Tool}}\n绑定请求的 type 必须等于工具类型。Codex 的 thread_id 只读取环境变量 CODEX_THREAD_ID（Windows 用 $env:CODEX_THREAD_ID）。这是当前会话提供的线程 ID，不要猜测或扫描历史会话。该值为空时跳过绑定，但仍上报最终答复并省略 thread_id。Claude Code、CodeBuddy、Qoder 使用当前会话 ID；Pi 使用 /session 展示的会话 ID。\n本会话持续绑定该任务；后续每轮均按 Skill 规则同步，直到会话结束。"
+    "description": "SkillPath, TaskUUID, Tool and ExecutionIndex identify the managed TeamBuddy task execution.",
+    "other": "请通过当前工具的原生 Skill 加载机制使用 [$teamsboard]({{.SkillPath}}) 处理 TeamBuddy 本地任务。\n\n任务 UUID：{{.TaskUUID}}\n\n工具类型：{{.Tool}}\n\n执行代次（execution_index）：{{.ExecutionIndex}}\n\n先核对任务的执行代次与上述值一致，再读取任务和历史动态，再按 Skill 指引取得并绑定当前真实会话 ID；取不到 ID 时暂停上报，提示升级工具或重新绑定。绑定请求的 type 必须等于工具类型。Codex 的 thread_id 只读取环境变量 CODEX_THREAD_ID（Windows 用 $env:CODEX_THREAD_ID）；这是当前会话提供的线程 ID，不要猜测或扫描历史会话。Claude Code、CodeBuddy、Qoder 使用当前会话 ID；Pi 从当前原生 shell 读取 PI_SESSION_ID。若取不到真实会话 ID，则暂停绑定、状态修改和动态上报，提示升级工具或重新绑定；继续处理原业务请求。\n\n本会话持续绑定该任务；后续每轮均按 Skill 规则同步用户消息、最终答复和任务状态，直到会话结束。"
+  },
+  "localserver_cli_skill_prompt": {
+    "description": "微信通道兜底任务的 CLI prompt。SkillPath 是 teamsboard-im-bot-cli Skill 的 markdown 本地路径；找不到时仅按名称引导。",
+    "other": "[$teamsboard-im-bot-cli]({{.SkillPath}})\n\n请使用 teamsboard-im-bot-cli Skill 处理 TeamBuddy 微信通道的兜底任务：用户通过微信发送消息后，TeamBuddy 无法识别为已知指令时，会自动创建单独任务并交给本地 CLI 处理。\n\n当前绑定任务 UUID：{{.TaskUUID}}\n任务标题：{{.TaskTitle}}\n任务状态：{{.TaskStatus}}\n用户消息：{{.Message}}\n\n按 teamsboard-im-bot-cli Skill 描述的流程处理；处理完成后通过 /api/local/cli-skill/chat-reply 把结果回传到微信。处理期间如需在 TeamBuddy 中汇报中间状态或异常，可使用 /api/local/cli-skill/messages 或 /api/local/cli-skill/activities。\n\n本会话持续处理该微信任务；该任务的会话 ID 已绑定到本 CLI，CLI 退出或被取消时 TeamBuddy 会自动通知用户。"
+  },
+  "localserver_task_cleanup_failed": {
+    "other": "任务已删除，但任务专属目录未能清理，请手动检查残留文件。"
+  },
+  "localserver_task_title_invalid": {
+    "other": "请输入 1–200 个字符的单行任务名称"
   },
   "localserver_vibe_cli_not_found": {
     "other": "未找到对应 CLI，请先安装并加入 PATH"
@@ -869,6 +900,9 @@
     "description": "Cannot delete a task status while Count tasks use it.",
     "other": "该状态下还有 {{.Count}} 个任务，无法删除"
   },
+  "localserver_no_active_step": {
+    "other": "当前任务没有进行中的步骤，无法推进。"
+  },
   "localserver_no_update_fields": {
     "other": "无更新字段"
   },
@@ -943,10 +977,10 @@
     "other": "动态类型仅支持 question 或 result"
   },
   "localserver_skill_caller_forbidden": {
-    "other": "仅允许本机 TeamsBoard Skill 调用"
+    "other": "仅允许本机 TeamBuddy Skill 调用"
   },
   "localserver_skill_loopback_required": {
-    "other": "TeamsBoard Skill 仅允许通过 loopback 调用"
+    "other": "TeamBuddy Skill 仅允许通过 loopback 调用"
   },
   "localserver_skill_status_invalid": {
     "other": "状态仅支持 pending、in_progress、blocked、done"
@@ -993,6 +1027,9 @@
   "localserver_vibe_coding_assigned_activity": {
     "other": "已指派至 Vibe Coding"
   },
+  "localserver_vibe_session_stale": {
+    "other": "当前会话未绑定或绑定已变更，请升级工具或在客户端重新绑定后再上报"
+  },
   "localserver_vibe_session_thread_id_invalid": {
     "other": "会话 ID 无效"
   },
@@ -1017,8 +1054,14 @@
   "localserver_workspace_invalid": {
     "other": "工作目录无效"
   },
+  "localserver_workspace_name_invalid": {
+    "other": "工作空间名称须为不超过 200 个字符的单行文本"
+  },
   "localserver_workspace_required": {
     "other": "至少需要一个工作目录"
+  },
+  "localserver_workspace_tasks_changed": {
+    "other": "任务已删除或工作目录已变化，请重新确认删除范围"
   },
   "localserver_workspace_unavailable": {
     "other": "任务工作目录不可用"
@@ -1030,7 +1073,7 @@
     "other": "Codex 已完成本轮执行，但没有返回文本结果。"
   },
   "remote_wechat_codex_executable_unavailable": {
-    "other": "TeamsBoard 后端无法找到 Codex 命令。请检查 Codex 安装或重启 TeamsBoard 后重试。"
+    "other": "TeamBuddy 后端无法找到 Codex 命令。请检查 Codex 安装或重启 TeamBuddy 后重试。"
   },
   "remote_wechat_codex_failed": {
     "other": "Codex 本轮执行未成功，请在客户端检查会话。"
@@ -1045,34 +1088,40 @@
     "other": "此 Codex 会话的写锁正由其他进程持有，微信暂时无法发送消息。请在该会话释放后重试。"
   },
   "remote_wechat_config_cli": {
-    "other": "任务执行配置未完成：请在 TeamsBoard 中选择 CLI 工具。"
+    "other": "任务执行配置未完成：请在 TeamBuddy 中选择 CLI 工具。"
   },
   "remote_wechat_config_codex_binding": {
-    "other": "任务执行配置未完成：请在 TeamsBoard 中绑定有效的 Codex 会话。"
+    "other": "任务执行配置未完成：请在 TeamBuddy 中绑定有效的 Codex 会话。"
   },
   "remote_wechat_config_expert": {
-    "other": "任务执行配置未完成：请在 TeamsBoard 中配置可用的专家团。"
+    "other": "任务执行配置未完成：请在 TeamBuddy 中配置可用的专家团。"
   },
   "remote_wechat_config_mode": {
-    "other": "任务执行配置未完成：请在 TeamsBoard 中选择受支持的执行方式。"
+    "other": "任务执行配置未完成：请在 TeamBuddy 中选择受支持的执行方式。"
   },
   "remote_wechat_config_model": {
-    "other": "任务执行配置未完成：请在 TeamsBoard 中选择模型。"
+    "other": "任务执行配置未完成：请在 TeamBuddy 中选择模型。"
   },
   "remote_wechat_config_pipeline": {
-    "other": "任务执行配置未完成：请在 TeamsBoard 中补齐流水线及各步骤的执行配置。"
+    "other": "任务执行配置未完成：请在 TeamBuddy 中补齐流水线及各步骤的执行配置。"
   },
   "remote_wechat_config_step": {
-    "other": "任务执行配置未完成：请在 TeamsBoard 中配置可执行的任务步骤。"
+    "other": "任务执行配置未完成：请在 TeamBuddy 中配置可执行的任务步骤。"
   },
   "remote_wechat_config_workspace": {
-    "other": "任务执行配置未完成：请在 TeamsBoard 中设置可用的工作目录。"
+    "other": "任务执行配置未完成：请在 TeamBuddy 中设置可用的工作目录。"
   },
   "remote_wechat_connect_failed": {
     "other": "连接微信失败，请刷新二维码后重试"
   },
   "remote_wechat_connected": {
     "other": "微信已经连接"
+  },
+  "remote_wechat_cli_unconfigured_for_dispatch": {
+    "other": "可以配置 CLI 进行 AI 配合处理任务。\n\n{{.Help}}"
+  },
+  "remote_wechat_cli_disabled_for_dispatch": {
+    "other": "CLI 兜底处理已关闭。如需启用，请在客户端远程通道页面的「配置 CLI」中开启总开关。\n\n{{.Help}}"
   },
   "remote_wechat_disconnect_failed": {
     "other": "取消微信连接失败"
@@ -1084,16 +1133,19 @@
     "other": "Codex 指令可能已开始执行，但客户端未收到运行 ID。请先在客户端核对会话，不要立即重发。"
   },
   "remote_wechat_empty_tasks": {
-    "other": "当前没有处于{{.Status}}的任务。\n{{.Help}}"
+    "other": "当前没有处于{{.Status}}的任务。\n\n{{.Help}}"
   },
   "remote_wechat_final_empty": {
     "other": "任务执行完成，未返回文本结果。"
   },
   "remote_wechat_help": {
-    "other": "输入 /task -a 查看所有任务，/task 或 /task -r 查看进行中任务，/task -f 查看已完成任务，/task -e 查看已阻塞任务。输入 @ 后接任务 ID，即可切换任务。"
+    "other": "输入 /task -a 查看所有任务，/task 或 /task -r 查看进行中任务，/task -f 查看已完成任务，/task -e 查看已阻塞任务。\n\n输入 @ 后接任务 ID，即可切换任务。\n\n输入 /help 查看所有命令。"
+  },
+  "remote_wechat_help_full": {
+    "other": "📋 TeamsBoard 微信通道命令说明：\n\n【任务列表】\n\n• /task 或 /task -r：查看进行中的任务\n\n• /task -a：查看所有任务\n\n• /task -f：查看已完成的任务\n\n• /task -e：查看已阻塞的任务\n\n• @：单独输入 @ 也可查看所有任务\n\n【任务操作】\n\n• @任务ID：切换到指定任务\n\n• @任务ID 消息内容：向指定任务发送消息\n\n• /ti 或 /task-info -id=<任务>：查看任务详情（友好 ID = 短 ID 或列表序号）\n\n• /ct 或 /create-task -t=<标题> [-d=<描述>] [-w=<目录>] [-pid=<项目序号>] [-plid=<流水线序号>] [-egid=<专家团序号>] [-em=<执行方式>] [-et=<CLI>] [-emdl=<模型>]：新建本地任务（参数较多，常用于 CLI 兜底）\n\n• /ctt 或 /create-team-task -tid=<本地任务短 ID> -ttid=<我的工作 ttid> [-t=<标题>]：参考本地任务的配置（项目/流水线/关联项目/工作目录/步骤 CLI 与模型），创建团队工作（最常用的建任务方式；-ttid 复制 /tt 输出里的 <ttid> 数字即可）\n\n• /n -id=<任务>：把任务推进到下一步；末步时返回「已经是最后一步了」，不会自动完成\n\n【直接发送消息】\n\n• 直接发送消息：向当前绑定的任务发送消息\n\n【会话控制】\n\n• /exit 或 /q 或 退出：退出当前任务，保留任务状态\n\n• /c 或 /cancel 或 取消：取消执行当前任务（首次进入二次确认，-f 直接执行）\n\n• /r 或 /resume 或 继续：把当前任务状态改回进行中（首次进入二次确认，-f 直接执行）\n\n• /d 或 /done 或 完成：标记当前任务完成并退出（首次进入二次确认，-f 直接执行）\n\n【代为操作本地客户端】\n\n• /tt 或 /teamstask：列出我的工作（云端）\n\n• /pro 或 /projects：列出本地项目\n\n• /pls 或 /pipelines：列出流水线（本地 + 云端缓存）\n\n• /egs 或 /expert-groups：列出专家团（本地 + 云端缓存）\n\n• /clis 或 /cli-discovery：列出已安装的 CLI\n\n• /clim 或 /cli-models -cid=<N>：列出指定 CLI 的模型\n\n• /vcl 或 /vibecodinglist 或 /codex-capability：列出 Vibe Coding 工具\n\n• /swm 或 /switch-model -id=<任务> [-cid=<N>] (-mid=<N> | -emdl=<模型名>)：切换 CLI 与模型（单独给 -mid 时沿用任务当前 CLI，不停止当前会话）\n\n• /swcli 或 /switch-cli -id=<任务> -cid=<N> (-mid=<N> | -emdl=<模型名>)：切换 CLI 与模型\n\n• /swr 或 /switch-run -t=<cli|pls|egs|vcl> -id=<任务> [-plid=<N>] [-egid=<N>] [-vid=<N>]：切换执行方式（先归档再重建）\n\n【其他】\n\n• /help 或 /h：显示本帮助信息"
   },
   "remote_wechat_id_invalid": {
-    "other": "任务 ID 无效。\n{{.Help}}"
+    "other": "任务 ID 无效。\n\n{{.Help}}"
   },
   "remote_wechat_last_none": {
     "other": "暂无最终执行结果"
@@ -1114,10 +1166,10 @@
     "other": "请问您想要操作哪个任务？\n\n{{.Help}}"
   },
   "remote_wechat_params_invalid": {
-    "other": "不支持的 /task 参数。\n{{.Help}}"
+    "other": "不支持的 /task 参数。\n\n{{.Help}}"
   },
   "remote_wechat_processing_failed": {
-    "other": "指令处理失败，请先在客户端核对执行情况，再决定是否重试。"
+    "other": "指令处理失败：{{.Detail}}\n\n请先在客户端核对 CLI 配置（cli_type / cli_model）和 CLI 可执行文件是否就绪，再决定是否重试。\n\n{{.Help}}"
   },
   "remote_wechat_qr_error": {
     "other": "获取微信登录二维码失败"
@@ -1126,7 +1178,7 @@
     "other": "生成微信登录二维码失败"
   },
   "remote_wechat_result": {
-    "other": "#{{.ID}} {{.Task}} 本轮执行结果：\n\n{{.Result}}\n\n输入 @{{.ID}} 切换到该任务可继续对话。"
+    "other": "@{{.ID}} {{.Task}} 本轮执行结果：\n\n{{.Result}}\n\n输入 @{{.ID}} 切换到该任务可继续对话。"
   },
   "remote_wechat_result_unavailable": {
     "other": "无法获取这次执行结果，请在客户端核对任务执行记录。"
@@ -1136,6 +1188,9 @@
   },
   "remote_wechat_send_ack": {
     "other": "已切换到{{.Task}}，并发送了消息：{{.Message}}\n\n客户端返回执行结果后我会发送给您，执行期间不支持继续对该任务发送消息。您可以输入 @ 后接任务 ID，切换到其他任务。"
+  },
+  "remote_wechat_cli_fallback_ack": {
+    "other": "已收到指令，已为消息创建单独的任务 @{{.ID}} 由 {{.CLI}} 接手处理。\n\n执行期间不支持继续对该任务发送消息，完成或失败时我会主动通知您。任务进度可在客户端「所有任务」中查看。"
   },
   "remote_wechat_state_error": {
     "other": "读取微信连接状态失败"
@@ -1152,14 +1207,17 @@
   "remote_wechat_status_running": {
     "other": "进行中"
   },
+  "remote_wechat_status_not_done": {
+    "other": "未完成"
+  },
   "remote_wechat_switch": {
-    "other": "已切换到{{.Task}}，最近一次执行结果是：\n{{.Result}}\n\n现在可以直接向我发送消息。我会自动将消息下发到该任务。也可以输入 @ 后接任务 ID，切换到其他任务。"
+    "other": "已切换到{{.Task}}，最近一次执行结果是：\n\n{{.Result}}\n\n现在可以直接向我发送消息。我会自动将消息下发到该任务。也可以输入 @ 后接任务 ID，切换到其他任务。"
   },
   "remote_wechat_task_deleted_title": {
     "other": "已删除任务"
   },
   "remote_wechat_task_missing": {
-    "other": "任务不存在或已删除。\n{{.Help}}"
+    "other": "任务不存在或已删除。\n\n{{.Help}}"
   },
   "remote_wechat_uncertain": {
     "other": "客户端重启时仍在处理上一条指令，其执行状态不确定。请先在客户端核对任务，再决定是否重新发送。"
@@ -1175,6 +1233,30 @@
   },
   "remote_wechat_verify_invalid": {
     "other": "请输入微信显示的验证码"
+  },
+  "remote_wechat_task_exited": {
+    "other": "已退出任务：{{.Task}}\n\n{{.Tasks}}"
+  },
+  "remote_wechat_task_resumed": {
+    "other": "已恢复继续执行 {{.Task}} 任务"
+  },
+  "remote_wechat_task_completed": {
+    "other": "已完成任务：{{.Task}}\n\n{{.Tasks}}"
+  },
+  "remote_wechat_no_task_bound": {
+    "other": "未进入任务，当前进行中的任务列表：\n\n{{.Tasks}}"
+  },
+  "remote_wechat_cancel_confirm": {
+    "other": "是否取消执行任务{{.Task}}？\n\n回复 yes / y / 是 / 对 / 取消 确认取消，或回复其他内容忽略本次询问。\n\n若想跳过二次确认，可直接发送 /c -f。"
+  },
+  "remote_wechat_resume_confirm": {
+    "other": "是否恢复继续执行任务 {{.Task}}？\n\n回复 yes / y / 是 / 对 确认恢复，或回复其他内容忽略本次询问。\n\n若想跳过二次确认，可直接发送 /r -f。"
+  },
+  "remote_wechat_done_confirm": {
+    "other": "是否将任务 {{.Task}} 标记为已完成并退出？\n\n回复 yes / y / 是 / 对 确认完成，或回复其他内容忽略本次询问。\n\n若想跳过二次确认，可直接发送 /d -f。"
+  },
+  "remote_wechat_cancel_done": {
+    "other": "已取消执行任务。\n\n退出任务请处输入 /q 或 /exit 或 退出\n\n{{.Tasks}}"
   },
   "taskgit_branch_invalid": {
     "other": "Git 分支无效或不存在"
@@ -1261,5 +1343,185 @@
   },
   "tool_sql_unsupported": {
     "other": "不支持的 SQL 操作：数据库工具仅允许只读查询（SELECT/EXPLAIN/SHOW/DESC）"
+  },
+  "localserver_skill_cloud_login_required": {
+    "other": "未登录云端，无法查看我的工作。请先在客户端登录。"
+  },
+  "localserver_skill_team_work_empty": {
+    "other": "暂无需要处理的工作。"
+  },
+  "localserver_skill_team_work_list": {
+    "other": "我的工作（* 表示已建本地任务）：\n\n{{.Items}}"
+  },
+  "localserver_skill_projects_empty": {
+    "other": "暂无本地项目。"
+  },
+  "localserver_skill_projects_list": {
+    "other": "本地项目：\n\n{{.Items}}"
+  },
+  "localserver_skill_pipelines_empty": {
+    "other": "暂无可用流水线（本地 + 云端缓存均无）。"
+  },
+  "localserver_skill_pipelines_list": {
+    "other": "流水线：\n\n{{.Items}}"
+  },
+  "localserver_skill_expert_groups_empty": {
+    "other": "暂无可用专家团（本地 + 云端缓存均无）。"
+  },
+  "localserver_skill_expert_groups_list": {
+    "other": "专家团：\n\n{{.Items}}"
+  },
+  "localserver_skill_expert_group_ready": {
+    "other": "已就绪"
+  },
+  "localserver_skill_expert_group_not_ready": {
+    "other": "未配置"
+  },
+  "localserver_skill_clis_empty": {
+    "other": "未检测到任何 CLI 工具。请先在客户端工具中心安装。"
+  },
+  "localserver_skill_clis_list": {
+    "other": "已安装 CLI：\n\n{{.Items}}"
+  },
+  "localserver_skill_cli_installed": {
+    "other": "已安装"
+  },
+  "localserver_skill_cli_missing": {
+    "other": "未安装"
+  },
+  "localserver_skill_cli_required": {
+    "other": "无法确定任务当前的 CLI，请提供 -cid=<CLI 序号>，可用 /clis 查看列表。"
+  },
+  "localserver_skill_cli_index_invalid": {
+    "other": "CLI 序号无效或越界，请先用 /clis 查看当前列表。"
+  },
+  "localserver_skill_model_index_invalid": {
+    "other": "模型序号无效或越界，请先用 /clim -cid=N 查看该 CLI 的模型列表。"
+  },
+  "localserver_skill_models_empty": {
+    "other": "{{.CLI}} 暂无可用模型。"
+  },
+  "localserver_skill_models_list": {
+    "other": "{{.CLI}} 可用模型：\n\n{{.Items}}"
+  },
+  "localserver_skill_vibe_tools_empty": {
+    "other": "暂无可用 Vibe Coding 工具。"
+  },
+  "localserver_skill_vibe_tools_list": {
+    "other": "Vibe Coding 工具：\n\n{{.Items}}"
+  },
+  "localserver_skill_vibe_tool_ready": {
+    "other": "已就绪"
+  },
+  "localserver_skill_vibe_tool_not_ready": {
+    "other": "未配置"
+  },
+  "localserver_skill_vibe_tool_required": {
+    "other": "切换 Vibe Coding 工具时必须提供 -vid=<工具序号>，请先用 /vcl 查看列表。"
+  },
+  "localserver_skill_vibe_tool_index_invalid": {
+    "other": "Vibe Coding 工具序号无效或越界。"
+  },
+  "localserver_skill_task_ref_required": {
+    "other": "缺少任务引用：请提供 -id=<任务短 ID 或列表序号>。"
+  },
+  "localserver_skill_task_ref_invalid": {
+    "other": "任务引用无效或任务不存在。"
+  },
+  "localserver_skill_task_last_step": {
+    "other": "已经是最后一步了。"
+  },
+  "localserver_skill_task_next_step_started": {
+    "other": "已进入下一步。"
+  },
+  "localserver_skill_task_created": {
+    "other": "已创建任务 @{{.ID}} {{.Title}}。"
+  },
+  "localserver_skill_template_requires_pipeline": {
+    "other": "参考任务必须已绑定流水线。"
+  },
+  "localserver_skill_team_work_index_invalid": {
+    "other": "我的工作序号无效，请先用 /tt 查看列表。"
+  },
+  "localserver_skill_team_work_id_not_found": {
+    "other": "我的工作 ttid 不存在，请先用 /tt 复制 <ttid> 数字再重试。"
+  },
+  "localserver_skill_team_work_item_missing": {
+    "other": "我的工作条目缺失 type 或 id，请重新执行 /tt 选一条有效条目。"
+  },
+  "localserver_skill_execution_switched": {
+    "other": "执行方式已切换。"
+  },
+  "localserver_skill_pipeline_index_required": {
+    "other": "切换流水线时必须提供 -plid=<流水线序号>，请先用 /pls 查看列表。"
+  },
+  "localserver_skill_pipeline_required_for_team_task": {
+    "other": "创建团队任务时必须提供 -plid=<流水线序号>。"
+  },
+  "localserver_skill_expert_group_index_required": {
+    "other": "切换专家团时必须提供 -egid=<专家团序号>，请先用 /egs 查看列表。"
+  },
+  "localserver_skill_pipeline_index_invalid": {
+    "other": "流水线序号无效或越界。"
+  },
+  "localserver_skill_project_index_invalid": {
+    "other": "项目序号无效或越界。"
+  },
+  "localserver_skill_expert_group_index_invalid": {
+    "other": "专家团序号无效或越界。"
+  },
+  "localserver_skill_step_configs_require_pipeline": {
+    "other": "提供 step_configs 时必须同时指定 -plid=<流水线序号>。"
+  },
+  "localserver_skill_step_unknown": {
+    "other": "step_configs 中存在未识别的步骤引用，请使用云端步骤 ID 或本地 step uuid。"
+  },
+  "remote_wechat_skill_call_failed": {
+    "other": "指令执行失败：{{.Detail}}"
+  },
+  "remote_wechat_skill_missing_cli_index": {
+    "other": "请提供 -cid=<CLI 序号>，可用 /clis 查看列表。"
+  },
+  "remote_wechat_skill_missing_task_ref": {
+    "other": "请提供 -id=<任务短 ID 或列表序号>，可用 /task -a 查看列表。"
+  },
+  "remote_wechat_skill_missing_model_index": {
+    "other": "请提供 -mid=<模型序号>（或 -emdl=<模型名>），可用 /clim -cid=N 查看该 CLI 的模型列表。"
+  },
+  "remote_wechat_skill_missing_title": {
+    "other": "请提供 -t=<任务标题>。"
+  },
+  "remote_wechat_skill_missing_mode": {
+    "other": "请提供 -t=<执行方式>：cli / pls / egs / vcl。"
+  },
+  "remote_wechat_skill_missing_template_ref": {
+    "other": "请提供 -tid=<本地任务短 ID 或列表序号>，可用 /task -a 查看列表。"
+  },
+  "remote_wechat_skill_missing_team_work_index": {
+    "other": "请提供 -ttid=<我的工作 ttid>，可从 /tt 输出的 <ttid> 数字复制。"
+  },
+  "localserver_skill_team_task_created": {
+    "other": "已创建团队任务 @{{.ID}} {{.Title}}。"
+  },
+  "localserver_skill_task_created_pipeline_hint": {
+    "other": "本任务是流水线执行，您可以使用 /n -id={{.ID}} 进行开始任务或下一步流水线。"
+  },
+  "localserver_skill_team_task_created_pipeline_hint": {
+    "other": "本任务是流水线执行，您可以使用 /n -id={{.ID}} 进行开始任务或下一步流水线。"
+  },
+  "localserver_skill_task_created_started": {
+    "other": "任务已开始执行。"
+  },
+  "localserver_skill_task_first_step_started": {
+    "other": "已启动流水线第一步，任务开始执行。"
+  },
+  "localserver_json_utf8_required": {
+    "other": "请求正文必须是有效的 UTF-8 JSON"
+  },
+  "localserver_skill_event_conflict": {
+    "other": "同一动态 ID 不能用于不同内容"
+  },
+  "localserver_skill_event_id_invalid": {
+    "other": "动态 ID 必须是有效 UUID"
   }
 }

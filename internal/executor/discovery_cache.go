@@ -6,48 +6,48 @@ import (
 	"time"
 )
 
-// cliDiscoveryRefreshInterval is how often the installed CLI list and the model
-// lists are re-detected in the background. Detection is expensive (it spawns
-// each CLI to read its version / model list), so the results are cached in
-// memory and persisted to clis.json / models.json, refreshed periodically
-// instead of on every request.
 const cliDiscoveryRefreshInterval = 3 * time.Minute
 
-// cliDiscoveryCache holds the latest discovery results (installed CLI list and
-// per-CLI model lists) plus the on-disk persistence handle. Reads are cheap (a
-// copy under RWMutex); writes happen when a refresh completes.
+// 单次实际探测的期限。等待其他扫描的时间不计入。
+var cliDiscoveryBudget = 45 * time.Second
+
+// 测试可替换探测实现，避免刷新测试启动真实 CLI。
+var (
+	discoverInstalledCLIs = DiscoverCLIs
+	refreshUserPath       = refreshDiscoveryPath
+	onDiscoveryWait       func()
+)
+
+// 发现缓存只保存可用快照；空模型结果允许下一次请求重试。
+// 同类探测共享在途结果，不同 CLI 的模型探测互不阻塞。
 type cliDiscoveryCache struct {
-	mu         sync.RWMutex
-	items      []DiscoveredCLI
-	models     map[string][]string
-	lastSync   time.Time
-	refreshing bool
-	persist    *discoveryPersist
+	mu           sync.RWMutex
+	items        []DiscoveredCLI
+	models       map[string][]string
+	lastSync     time.Time
+	refresh      *cliDiscoveryCall
+	modelFlights map[string]*modelDiscoveryCall
+	generations  map[string]uint64
+	persist      *discoveryPersist
 }
 
-var defaultCLIDiscovery = &cliDiscoveryCache{
-	models: map[string][]string{},
+type cliDiscoveryCall struct {
+	done        chan struct{}
+	err         error
+	refreshPath bool
 }
 
-// refreshMu guards refreshCLIAndModels so periodic refreshes never overlap
-// (a slow model probe must not pile up behind the ticker).
+type modelDiscoveryCall struct {
+	done       chan struct{}
+	models     []string
+	generation uint64
+}
+
+var defaultCLIDiscovery = &cliDiscoveryCache{models: map[string][]string{}}
+
+// refreshMu 防止周期任务重叠；手动检测共享同一轮实际探测。
 var refreshMu sync.Mutex
 
-// modelProbeMu serializes live model probes triggered by HTTP requests so
-// concurrent pickers do not spawn the same CLI repeatedly.
-var modelProbeMu sync.Mutex
-
-// StartCLIDiscoveryRefresh primes the discovery cache and keeps it fresh:
-//
-//  1. loads the on-disk snapshots (clis.json / models.json) into memory if
-//     present;
-//  2. re-detects the installed CLI list and the model list of every installed
-//     CLI asynchronously, updating memory and persisting to disk;
-//  3. repeats the detection every cliDiscoveryRefreshInterval until ctx is
-//     cancelled.
-//
-// The background work never blocks HTTP handlers: they serve the on-disk
-// snapshots directly when present (see GetCLIDiscovery / GetCLIModels).
 func StartCLIDiscoveryRefresh(ctx context.Context, configDir string) {
 	persist := newDiscoveryPersist(configDir)
 	cache := defaultCLIDiscovery
@@ -55,20 +55,16 @@ func StartCLIDiscoveryRefresh(ctx context.Context, configDir string) {
 	cache.persist = persist
 	cache.mu.Unlock()
 
+	// 在后台探测开始前载入快照，避免冷启动请求与快照写回互相覆盖。
+	if items, ok := persist.loadCLIs(); ok {
+		cache.setItems(items)
+	}
+	if models, ok := persist.loadModels(); ok {
+		cache.setModels(models)
+	}
 	go persist.runWriteQueue(ctx)
-
 	go func() {
-		// Seed memory from the last snapshot so the cache is never empty even
-		// while the first full detection is still running.
-		if items, ok := persist.loadCLIs(); ok {
-			cache.setItems(items)
-		}
-		if models, ok := persist.loadModels(); ok {
-			cache.setModels(models)
-		}
-
-		refreshCLIAndModels(context.Background())
-
+		refreshCLIAndModels(ctx)
 		ticker := time.NewTicker(cliDiscoveryRefreshInterval)
 		defer ticker.Stop()
 		for {
@@ -76,160 +72,187 @@ func StartCLIDiscoveryRefresh(ctx context.Context, configDir string) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				refreshCLIAndModels(context.Background())
+				refreshCLIAndModels(ctx)
 			}
 		}
 	}()
 }
 
-// refreshCLIAndModels re-detects the installed CLI list and the model list of
-// every installed CLI, updates the in-memory cache and persists the latest
-// snapshots. Overlapping runs are skipped.
 func refreshCLIAndModels(ctx context.Context) {
 	if !refreshMu.TryLock() {
 		return
 	}
 	defer refreshMu.Unlock()
-
-	items := DiscoverCLIs(ctx)
-	cache := defaultCLIDiscovery
-	cache.setItems(items)
-
-	models := make(map[string][]string, len(items))
-	var mu sync.Mutex
+	if refreshCLIDiscovery(ctx, false) != nil {
+		return
+	}
 	var wg sync.WaitGroup
-	for _, item := range items {
+	for _, item := range GetCLIDiscovery(ctx) {
 		if !item.Installed {
 			continue
 		}
 		wg.Add(1)
 		go func(cliType string) {
 			defer wg.Done()
-			probed := DiscoverCLIModels(ctx, cliType)
-			mu.Lock()
-			models[cliType] = probed
-			mu.Unlock()
+			RefreshCLIModels(ctx, cliType)
 		}(item.Type)
 	}
 	wg.Wait()
-	cache.setModels(models)
-
-	cache.persistSnapshot()
 }
 
-// GetCLIDiscovery returns the installed CLI list. The in-memory cache is
-// served first (it is always at least as fresh as the on-disk snapshot);
-// when it has not been populated yet the on-disk snapshot (clis.json) is
-// used so the picker opens without spawning any CLI. Only when neither is
-// available is a synchronous detection performed and persisted.
 func GetCLIDiscovery(ctx context.Context) []DiscoveredCLI {
 	cache := defaultCLIDiscovery
-
 	cache.mu.RLock()
 	ready := !cache.lastSync.IsZero()
-	if ready {
-		items := cloneCLIList(cache.items)
-		cache.mu.RUnlock()
-		return items
-	}
-	cache.mu.RUnlock()
-
-	if p := cache.getPersist(); p != nil {
-		if items, ok := p.loadCLIs(); ok {
-			if items == nil {
-				return []DiscoveredCLI{}
-			}
-			return items
-		}
-	}
-
-	_ = RefreshCLIDiscovery(ctx)
-	cache.mu.RLock()
 	items := cloneCLIList(cache.items)
 	cache.mu.RUnlock()
-	return items
+	if ready {
+		return items
+	}
+	_ = RefreshCLIDiscovery(ctx)
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	return cloneCLIList(cache.items)
 }
 
-// GetCLIModels returns the model list for a CLI type. The in-memory cache is
-// served first; when it has no entry for the type the on-disk snapshot
-// (models.json) is used. Only when both lack the type is the CLI spawned to
-// probe live; live probes are serialized so concurrent requests do not spawn
-// the same CLI repeatedly.
 func GetCLIModels(ctx context.Context, cliType string) []string {
-	cache := defaultCLIDiscovery
+	return defaultCLIDiscovery.probeModels(ctx, cliType, false)
+}
 
-	if models, ok := cache.getModel(cliType); ok {
+// RefreshCLIModels 绕过缓存；暂时探测失败时保留同一安装版本的可用列表。
+func RefreshCLIModels(ctx context.Context, cliType string) []string {
+	return defaultCLIDiscovery.probeModels(ctx, cliType, true)
+}
+
+func (c *cliDiscoveryCache) probeModels(ctx context.Context, cliType string, force bool) []string {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	c.mu.Lock()
+	if !force && len(c.models[cliType]) > 0 {
+		models := cloneModels(c.models[cliType])
+		c.mu.Unlock()
 		return models
 	}
-
-	if p := cache.getPersist(); p != nil {
-		if all, ok := p.loadModels(); ok {
-			if models := all[cliType]; models != nil {
-				return models
-			}
+	if call := c.modelFlights[cliType]; call != nil {
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			models, _ := c.getModel(cliType)
+			return models
+		case <-call.done:
+			return cloneModels(call.models)
 		}
 	}
-
-	modelProbeMu.Lock()
-	defer modelProbeMu.Unlock()
-
-	// While waiting for the probe lock another request may have probed and
-	// cached this CLI; re-check memory and the snapshot to avoid a duplicate
-	// spawn.
-	if models, ok := cache.getModel(cliType); ok {
+	if ctx.Err() != nil {
+		models := cloneModels(c.models[cliType])
+		c.mu.Unlock()
 		return models
 	}
-	if p := cache.getPersist(); p != nil {
-		if all, ok := p.loadModels(); ok {
-			if models := all[cliType]; models != nil {
-				return models
-			}
-		}
+	if c.modelFlights == nil {
+		c.modelFlights = make(map[string]*modelDiscoveryCall)
 	}
+	call := &modelDiscoveryCall{done: make(chan struct{}), generation: c.generations[cliType]}
+	c.modelFlights[cliType] = call
+	c.mu.Unlock()
 
 	models := DiscoverCLIModels(ctx, cliType)
-	cache.setModel(cliType, models)
-	cache.persistSnapshot()
-	return models
+	c.mu.Lock()
+	// 安装状态/版本变更或请求取消后，不让旧探测覆盖新的缓存。
+	if ctx.Err() == nil && call.generation == c.generations[cliType] && len(models) > 0 {
+		if c.models == nil {
+			c.models = make(map[string][]string)
+		}
+		c.models[cliType] = cloneModels(models)
+	}
+	call.models = cloneModels(c.models[cliType])
+	if c.modelFlights[cliType] == call {
+		delete(c.modelFlights, cliType)
+	}
+	close(call.done)
+	c.mu.Unlock()
+	c.persistSnapshot()
+	return cloneModels(call.models)
 }
 
-// RefreshCLIDiscovery forces a synchronous re-detection of the CLI list and
-// updates the cache. Concurrent callers share the same in-flight refresh to
-// avoid spawning each CLI several times at once.
+// RefreshCLIDiscovery 完成实际检测后才返回；并发调用等待同一轮结果。
 func RefreshCLIDiscovery(ctx context.Context) error {
-	cache := defaultCLIDiscovery
+	return refreshCLIDiscovery(ctx, true)
+}
 
+func refreshCLIDiscovery(ctx context.Context, refreshPath bool) error {
+	return refreshCLIDiscoveryOnce(ctx, refreshPath, true)
+}
+
+// allowRetry 只补一轮：等待到的扫描没有刷新 PATH，或对方已取消而本次请求仍有效。
+// 再失败就返回，避免后台扫描持续超时时来回重试。
+func refreshCLIDiscoveryOnce(ctx context.Context, refreshPath bool, allowRetry bool) error {
+	cache := defaultCLIDiscovery
 	cache.mu.Lock()
-	if cache.refreshing {
+	if call := cache.refresh; call != nil {
 		cache.mu.Unlock()
-		return nil
+		if onDiscoveryWait != nil {
+			onDiscoveryWait()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-call.done:
+			if allowRetry && shouldRediscover(ctx, refreshPath, call) {
+				return refreshCLIDiscoveryOnce(ctx, refreshPath, false)
+			}
+			return call.err
+		}
 	}
-	cache.refreshing = true
+	if err := ctx.Err(); err != nil {
+		cache.mu.Unlock()
+		return err
+	}
+	// 期限从真正开始探测时计算。前面的等待不能吃掉手动刷新的 45 秒。
+	runCtx, cancel := context.WithTimeout(ctx, cliDiscoveryBudget)
+	defer cancel()
+	call := &cliDiscoveryCall{done: make(chan struct{}), refreshPath: refreshPath}
+	cache.refresh = call
 	cache.mu.Unlock()
 
-	defer func() {
-		cache.mu.Lock()
-		cache.refreshing = false
-		cache.mu.Unlock()
-	}()
-
-	items := DiscoverCLIs(ctx)
-
-	cache.setItems(items)
-	cache.persistSnapshot()
-	return nil
+	if refreshPath {
+		refreshUserPath(runCtx)
+	}
+	items := discoverInstalledCLIs(runCtx)
+	err := runCtx.Err()
+	if err == nil {
+		cache.setItems(items)
+		cache.persistSnapshot()
+	}
+	cache.mu.Lock()
+	call.err = err
+	cache.refresh = nil
+	close(call.done)
+	cache.mu.Unlock()
+	return err
 }
 
-// cloneCLIList returns a copy of the cached items so callers cannot mutate the
-// cached state. The DiscoverCLIs output carries no model data, so a shallow
-// copy of the outer slice is sufficient.
-func cloneCLIList(items []DiscoveredCLI) []DiscoveredCLI {
-	if items == nil {
-		return []DiscoveredCLI{}
+func shouldRediscover(ctx context.Context, refreshPath bool, call *cliDiscoveryCall) bool {
+	if ctx.Err() != nil {
+		return false
 	}
+	if refreshPath && !call.refreshPath {
+		return true
+	}
+	// 对方的取消或超时不属于本次请求；本次 context 仍有效时再探测一轮。
+	return call.err != nil
+}
+
+func cloneCLIList(items []DiscoveredCLI) []DiscoveredCLI {
 	out := make([]DiscoveredCLI, len(items))
 	copy(out, items)
+	for i := range out {
+		out[i].Models = cloneModels(out[i].Models)
+	}
 	return out
+}
+
+func cloneModels(models []string) []string {
+	return append([]string{}, models...)
 }
 
 func (c *cliDiscoveryCache) getPersist() *discoveryPersist {
@@ -240,35 +263,58 @@ func (c *cliDiscoveryCache) getPersist() *discoveryPersist {
 
 func (c *cliDiscoveryCache) setItems(items []DiscoveredCLI) {
 	c.mu.Lock()
-	c.items = items
+	defer c.mu.Unlock()
+	previous := make(map[string]DiscoveredCLI, len(c.items))
+	for _, item := range c.items {
+		previous[item.Type] = item
+	}
+	next := cloneCLIList(items)
+	for i, item := range next {
+		old, exists := previous[item.Type]
+		delete(previous, item.Type)
+		// --version 暂时失败不能让同一安装的可用模型丢失。
+		if exists && item.Installed && old.Installed && item.ExecPath == old.ExecPath && item.Version == "" {
+			next[i].Version = old.Version
+		}
+		if !item.Installed || (exists && (old.Installed != item.Installed || old.ExecPath != item.ExecPath || old.Version != next[i].Version)) {
+			c.invalidateModelLocked(item.Type)
+		}
+	}
+	for cliType := range previous {
+		c.invalidateModelLocked(cliType)
+	}
+	c.items = next
 	c.lastSync = time.Now()
-	c.mu.Unlock()
+}
+
+func (c *cliDiscoveryCache) invalidateModelLocked(cliType string) {
+	delete(c.models, cliType)
+	// 新安装不能等待旧安装的在途请求；旧请求仍按自己的 context 有界退出。
+	delete(c.modelFlights, cliType)
+	if c.generations == nil {
+		c.generations = make(map[string]uint64)
+	}
+	c.generations[cliType]++
 }
 
 func (c *cliDiscoveryCache) setModels(models map[string][]string) {
 	c.mu.Lock()
-	c.models = models
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	c.models = make(map[string][]string, len(models))
+	for cliType, list := range models {
+		if len(list) > 0 {
+			c.models[cliType] = cloneModels(list)
+		}
+	}
 }
 
 func (c *cliDiscoveryCache) getModel(cliType string) ([]string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	models, ok := c.models[cliType]
-	return models, ok
+	return cloneModels(models), ok
 }
 
-func (c *cliDiscoveryCache) setModel(cliType string, models []string) {
-	c.mu.Lock()
-	if c.models == nil {
-		c.models = map[string][]string{}
-	}
-	c.models[cliType] = models
-	c.mu.Unlock()
-}
-
-// persistSnapshot submits the latest in-memory snapshots to the write queue
-// (non-blocking; the queue serializes actual disk writes).
 func (c *cliDiscoveryCache) persistSnapshot() {
 	p := c.getPersist()
 	if p == nil {
@@ -278,8 +324,9 @@ func (c *cliDiscoveryCache) persistSnapshot() {
 	items := cloneCLIList(c.items)
 	models := make(map[string][]string, len(c.models))
 	for k, v := range c.models {
-		models[k] = append([]string(nil), v...)
+		models[k] = cloneModels(v)
 	}
-	c.mu.RUnlock()
+	// 排队动作也在快照锁内，防止旧快照延迟入队覆盖较新的快照。
 	p.saveLatest(items, models)
+	c.mu.RUnlock()
 }

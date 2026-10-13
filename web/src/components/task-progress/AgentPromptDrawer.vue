@@ -3,7 +3,7 @@
     :open="open"
     width="min(922px, 100vw)"
     :closable="false"
-    :mask-closable="false"
+    :mask-closable="true"
     :body-style="{ padding: 0, overflow: 'hidden' }"
     root-class-name="agent-prompt-drawer"
     @close="requestClose"

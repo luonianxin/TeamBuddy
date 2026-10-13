@@ -462,12 +462,38 @@ function applyCreateTaskDefaults() {
     const project = projects.value.find((item) => item.uuid === form.project_uuid)
     if (project?.local_dir) form.work_dir = project.local_dir
   }
+  form.priority = defaults.priority
+
+  const executionMode =
+    defaults.execution_mode || (defaults.pipeline_uuid ? 'pipeline' : '')
   if (
+    executionMode === 'pipeline' &&
     defaults.pipeline_uuid &&
     pipelines.value.some((item) => item.uuid === defaults.pipeline_uuid)
   ) {
-    form.pipeline_uuid = defaults.pipeline_uuid
     form.execution_mode = 'pipeline'
+    form.pipeline_uuid = defaults.pipeline_uuid
+  } else if (
+    executionMode === 'expert_group' &&
+    defaults.expert_group_uuid &&
+    expertGroups.value.some((item) => item.uuid === defaults.expert_group_uuid)
+  ) {
+    form.execution_mode = 'expert_group'
+    form.expert_group_uuid = defaults.expert_group_uuid
+  } else if (
+    executionMode === 'vibe_coding' &&
+    isVibeCodingTool(defaults.execution_tool)
+  ) {
+    form.execution_mode = 'vibe_coding'
+    form.execution_tool = defaults.execution_tool
+  } else if (
+    executionMode === 'cli' &&
+    defaults.execution_tool &&
+    defaults.model_name
+  ) {
+    form.execution_mode = 'cli'
+    form.execution_tool = defaults.execution_tool
+    form.model_name = defaults.model_name
   }
 }
 
@@ -596,6 +622,11 @@ async function confirm() {
       project_uuid: form.project_uuid,
       work_dir: form.work_dir,
       pipeline_uuid: form.pipeline_uuid,
+      priority: form.priority,
+      execution_mode: form.execution_mode,
+      execution_tool: form.execution_tool,
+      model_name: form.model_name,
+      expert_group_uuid: form.expert_group_uuid,
     })
     message.success(t('teamwork.configure.created'))
     createdTaskUuid = result.uuid

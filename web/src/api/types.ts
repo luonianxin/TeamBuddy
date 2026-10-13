@@ -3,6 +3,7 @@
 /** User information */
 export interface UserInfo {
   id: string
+  accountScope?: string
   username: string
   displayName?: string
   avatar?: string

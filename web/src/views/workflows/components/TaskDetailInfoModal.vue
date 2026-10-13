@@ -3,26 +3,22 @@
     :open="open"
     :footer="null"
     :closable="false"
-    :mask="!fullscreen"
-    :z-index="fullscreen ? 1100 : 1000"
     :body-style="{ padding: 0 }"
-    :width="fullscreen ? '100%' : 922"
-    :centered="!fullscreen"
-    :transition-name="fullscreen ? '' : undefined"
-    :mask-transition-name="fullscreen ? '' : undefined"
-    :class="{ 'task-detail-dialog-fullscreen': fullscreen }"
-    :style="fullscreen ? { width: '100%', maxWidth: '100%', height: '100%', top: 0, margin: 0, paddingBottom: 0 } : undefined"
-    :wrap-class-name="`${editing ? 'task-detail-info-modal task-edit-modal' : 'task-detail-info-modal'}${fullscreen ? ' is-fullscreen' : ''}`"
-    :wrap-props="fullscreen ? { style: { position: 'fixed', top: '0', left: '0', right: '0', bottom: '0', width: '100%', height: '100%', overflow: 'hidden' } } : undefined"
+    :width="922"
+    centered
+    :wrap-class-name="editing ? 'task-detail-info-modal task-edit-modal' : 'task-detail-info-modal'"
     @cancel="handleOpenChange(false)"
     @update:open="handleOpenChange"
   >
     <div
       class="task-detail-modal"
-      :class="{ 'is-editing': editing, 'is-fullscreen': fullscreen }"
+      :class="{ 'is-editing': editing }"
     >
       <template v-if="task && editing">
-        <div class="modal-body edit-modal-body">
+        <div
+          class="modal-body edit-modal-body"
+          :class="{ 'task-info-collapsed': taskInfoCollapsed }"
+        >
           <section class="requirement-pane edit-requirement-pane">
             <div class="edit-title-heading">
               <a-input
@@ -32,38 +28,92 @@
                 :placeholder="t('workflows.task.create.titleRequired')"
                 class="title-input"
               />
+              <div
+                v-if="taskInfoCollapsed"
+                class="requirement-header-actions"
+              >
+                <button
+                  type="button"
+                  class="task-info-toggle"
+                  :disabled="saving"
+                  :aria-label="t('workflows.task.detail.expandTaskInfo')"
+                  :aria-expanded="false"
+                  @click="taskInfoCollapsed = false"
+                >
+                  <img
+                    :src="directoryToggleIcon"
+                    alt=""
+                    aria-hidden="true"
+                    class="task-info-toggle-icon"
+                  />
+                </button>
+                <button
+                  type="button"
+                  class="task-info-close task-info-close--inline"
+                  :disabled="saving"
+                  :aria-label="t('workflows.task.detail.closeEdit')"
+                  @click="handleOpenChange(false)"
+                >
+                  <img
+                    :src="closeIcon"
+                    alt=""
+                    aria-hidden="true"
+                  />
+                </button>
+              </div>
             </div>
             <div class="description-box">
-              <MarkdownEditor
+              <TiptapMarkdownEditor
                 v-if="open && editing"
                 ref="descriptionEditor"
-                v-model="form.description"
-                cache-id="edit-task-description"
+                :model-value="form.description"
                 :placeholder="t('workflows.task.create.description')"
                 :disabled="saving"
                 :on-upload-images="handleDescriptionImages"
+                variant="compact"
+                @update:model-value="handleDescriptionChange"
+                @ready="normalizeDescriptionForEditor"
               />
             </div>
           </section>
 
-          <aside class="task-info-pane edit-task-info-pane">
-            <h3>{{ t('workflows.task.detail.taskInfo') }}</h3>
-            <button type="button" class="task-info-fullscreen" :aria-label="fullscreen ? t('workflows.task.common.exitFullscreen') : t('workflows.task.common.fullscreen')" @click="fullscreen = !fullscreen">
-              <FullscreenExitOutlined v-if="fullscreen" /><FullscreenOutlined v-else />
-            </button>
-            <button
-              type="button"
-              class="task-info-close"
-              :disabled="saving"
-              :aria-label="t('workflows.task.detail.closeEdit')"
-              @click="handleOpenChange(false)"
-            >
-              <img
-                :src="closeIcon"
-                alt=""
-                aria-hidden="true"
-              />
-            </button>
+          <aside
+            v-if="!taskInfoCollapsed"
+            class="task-info-pane edit-task-info-pane"
+          >
+            <div class="task-info-pane-heading">
+              <h3>{{ t('workflows.task.detail.taskInfo') }}</h3>
+              <div class="task-info-heading-actions">
+                <button
+                  type="button"
+                  class="task-info-toggle"
+                  :disabled="saving"
+                  :aria-label="t('workflows.task.detail.collapseTaskInfo')"
+                  :aria-expanded="true"
+                  @click="taskInfoCollapsed = true"
+                >
+                  <img
+                    :src="directoryToggleIcon"
+                    alt=""
+                    aria-hidden="true"
+                    class="task-info-toggle-icon"
+                  />
+                </button>
+                <button
+                  type="button"
+                  class="task-info-close task-info-close--inline"
+                  :disabled="saving"
+                  :aria-label="t('workflows.task.detail.closeEdit')"
+                  @click="handleOpenChange(false)"
+                >
+                  <img
+                    :src="closeIcon"
+                    alt=""
+                    aria-hidden="true"
+                  />
+                </button>
+              </div>
+            </div>
             <div class="task-info-list edit-task-info-list">
               <div class="task-info-item edit-task-info-item">
                 <span class="info-icon">
@@ -412,11 +462,43 @@
       <div
         v-else-if="task"
         class="modal-body"
+        :class="{ 'task-info-collapsed': taskInfoCollapsed }"
       >
         <section class="requirement-pane">
           <div class="requirement-summary">
             <div class="requirement-title-rule">
               <h3>{{ task.title }}</h3>
+              <div
+                v-if="taskInfoCollapsed"
+                class="requirement-header-actions"
+              >
+                <button
+                  type="button"
+                  class="task-info-toggle"
+                  :aria-label="t('workflows.task.detail.expandTaskInfo')"
+                  :aria-expanded="false"
+                  @click="taskInfoCollapsed = false"
+                >
+                  <img
+                    :src="directoryToggleIcon"
+                    alt=""
+                    aria-hidden="true"
+                    class="task-info-toggle-icon"
+                  />
+                </button>
+                <button
+                  type="button"
+                  class="task-info-close task-info-close--inline"
+                  :aria-label="t('workflows.task.detail.closeDetails')"
+                  @click="handleOpenChange(false)"
+                >
+                  <img
+                    :src="closeIcon"
+                    alt=""
+                    aria-hidden="true"
+                  />
+                </button>
+              </div>
             </div>
           </div>
           <div
@@ -443,23 +525,41 @@
           </button>
         </section>
 
-        <aside class="task-info-pane">
-          <h3>{{ t('workflows.task.detail.taskInfo') }}</h3>
-          <button type="button" class="task-info-fullscreen" :aria-label="fullscreen ? t('workflows.task.common.exitFullscreen') : t('workflows.task.common.fullscreen')" @click="fullscreen = !fullscreen">
-            <FullscreenExitOutlined v-if="fullscreen" /><FullscreenOutlined v-else />
-          </button>
-          <button
-            type="button"
-            class="task-info-close"
-            :aria-label="t('workflows.task.detail.closeDetails')"
-            @click="handleOpenChange(false)"
-          >
-            <img
-              :src="closeIcon"
-              alt=""
-              aria-hidden="true"
-            />
-          </button>
+        <aside
+          v-if="!taskInfoCollapsed"
+          class="task-info-pane"
+        >
+          <div class="task-info-pane-heading">
+            <h3>{{ t('workflows.task.detail.taskInfo') }}</h3>
+            <div class="task-info-heading-actions">
+              <button
+                type="button"
+                class="task-info-toggle"
+                :aria-label="t('workflows.task.detail.collapseTaskInfo')"
+                :aria-expanded="true"
+                @click="taskInfoCollapsed = true"
+              >
+                <img
+                  :src="directoryToggleIcon"
+                  alt=""
+                  aria-hidden="true"
+                  class="task-info-toggle-icon"
+                />
+              </button>
+              <button
+                type="button"
+                class="task-info-close task-info-close--inline"
+                :aria-label="t('workflows.task.detail.closeDetails')"
+                @click="handleOpenChange(false)"
+              >
+                <img
+                  :src="closeIcon"
+                  alt=""
+                  aria-hidden="true"
+                />
+              </button>
+            </div>
+          </div>
           <div class="task-info-list">
             <div class="task-info-item">
               <span class="info-icon">
@@ -652,13 +752,13 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { message } from 'ant-design-vue'
-import { DownOutlined, EditOutlined, FullscreenExitOutlined, FullscreenOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import { DownOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import apiClient from '@/api/client'
-import { useContentFullscreen } from '@/composables/useContentFullscreen'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
-import MarkdownEditor from '@/components/MarkdownEditor.vue'
+import TiptapMarkdownEditor from '@/components/TiptapMarkdownEditor.vue'
 import { useTaskImageAttachments } from '@/composables/useTaskImageAttachments'
 import closeIcon from '@/assets/icons/task-detail-close.svg'
+import directoryToggleIcon from '@/assets/icons/knowledge-directory-toggle.svg'
 import dateIcon from '@/assets/icons/task-detail-date.svg'
 import pipelineIcon from '@/assets/icons/task-detail-pipeline.svg'
 import priorityIcon from '@/assets/icons/task-detail-priority.svg'
@@ -672,6 +772,7 @@ import { usePipelineStore } from '@/stores/pipeline'
 import type { LocalProject } from '@/types/project'
 import type { TaskWithDetails } from '@/types/task-detail'
 import { isPipelineCloud } from '@/utils/pipeline'
+import { isLegacyRichTextHtml } from '@/utils/richText'
 import { useAppI18n } from '@/i18n'
 
 const { t } = useAppI18n()
@@ -692,11 +793,16 @@ const emit = defineEmits<{
 const pipelineStore = usePipelineStore()
 const { pipelines } = storeToRefs(pipelineStore)
 const editing = ref(false)
-const { fullscreen } = useContentFullscreen()
-watch(() => props.open, (open) => { if (!open) fullscreen.value = false })
+const TASK_INFO_COLLAPSED_STORAGE_KEY = 'goteams.workflows.task-info-collapsed.v1'
+const taskInfoCollapsed = ref(readTaskInfoCollapsed())
 const saving = ref(false)
 let saveVersion = 0
-const descriptionEditor = ref<{ getValue: () => string }>()
+const originalDescription = ref('')
+const descriptionTouched = ref(false)
+const descriptionEditor = ref<{
+  getValue: () => string
+  htmlToMarkdown: (value: string) => string
+}>()
 const { addImages, clear: clearImageAttachments, isSaving: isSavingPastedImages, resolveAttachmentMarkdown, uploadAttachmentsToTask } = useTaskImageAttachments()
 const projects = ref<LocalProject[]>([])
 const form = reactive({
@@ -800,6 +906,22 @@ const allWorkDirs = computed(() => {
   return [...new Map(dirs.map((value) => [value.toLowerCase(), value])).values()]
 })
 
+function readTaskInfoCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(TASK_INFO_COLLAPSED_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+watch(taskInfoCollapsed, (collapsed) => {
+  try {
+    window.localStorage.setItem(TASK_INFO_COLLAPSED_STORAGE_KEY, String(collapsed))
+  } catch {
+    // 本地存储不可用时，仍保留当前弹窗实例内的展开状态。
+  }
+})
+
 watch(
   () => props.open,
   (open) => {
@@ -875,6 +997,8 @@ function syncFormFromTask() {
   const task = props.task
   form.title = task?.title || ''
   form.description = task?.description || ''
+  originalDescription.value = form.description
+  descriptionTouched.value = false
   form.pipeline_uuid = task?.selected_pipeline_uuid || ''
   form.project_uuid = task?.project_uuid || ''
   form.child_project_uuids = (task?.projects || [])
@@ -894,6 +1018,17 @@ function syncFormFromTask() {
   form.priority = normalizePriority(task?.priority)
   form.planned_start_date = formatDateValue(task?.planned_start_date)
   form.planned_end_date = formatDateValue(task?.planned_end_date)
+}
+
+function normalizeDescriptionForEditor() {
+  if (!isLegacyRichTextHtml(originalDescription.value)) return
+  const markdown = descriptionEditor.value?.htmlToMarkdown(form.description)
+  if (markdown !== undefined) form.description = markdown
+}
+
+function handleDescriptionChange(value: string) {
+  form.description = value
+  descriptionTouched.value = true
 }
 
 async function enterEdit() {
@@ -966,7 +1101,9 @@ async function save() {
   const taskUuid = props.task.uuid
   const requestVersion = ++saveVersion
   const isCurrentSave = () => requestVersion === saveVersion && props.open && props.task?.uuid === taskUuid
-  const description = descriptionEditor.value?.getValue() ?? form.description
+  const description = descriptionTouched.value
+    ? descriptionEditor.value?.getValue() ?? form.description
+    : originalDescription.value
   const payload: Record<string, unknown> = {
     title: form.title.trim(),
     priority: form.priority || undefined,
@@ -990,6 +1127,8 @@ async function save() {
     await apiClient.put(`/tasks/${encodeURIComponent(taskUuid)}`, payload)
     if (!isCurrentSave()) return
     form.description = content
+    originalDescription.value = content
+    descriptionTouched.value = false
     message.success(t('workflows.task.detail.updated'))
     editing.value = false
     emit('saved')
@@ -1085,19 +1224,6 @@ async function handleDescriptionImages(files: File[]) {
   overflow-y: auto;
   padding: 24px;
   border-right: 1px solid #f0f0f0;
-  scrollbar-color: #a1a7b2 transparent;
-  scrollbar-width: thin;
-}
-
-.requirement-pane::-webkit-scrollbar,
-.task-info-pane::-webkit-scrollbar {
-  width: 4px;
-}
-
-.requirement-pane::-webkit-scrollbar-thumb,
-.task-info-pane::-webkit-scrollbar-thumb {
-  border-radius: 16px;
-  background: #a1a7b2;
 }
 
 .requirement-summary {
@@ -1159,21 +1285,6 @@ async function handleDescriptionImages(files: File[]) {
 
 .task-primary :deep(.description-input) {
   padding: 8px 4px !important;
-}
-
-.description-input::-webkit-scrollbar {
-  width: 11px;
-}
-
-.description-input::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.description-input::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 16px;
-  background: #a1a7b2;
-  background-clip: content-box;
 }
 
 .chip-row {
@@ -1587,8 +1698,6 @@ async function handleDescriptionImages(files: File[]) {
   overflow-x: hidden;
   overflow-y: auto;
   padding: 24px;
-  scrollbar-color: #a1a7b2 transparent;
-  scrollbar-width: thin;
 }
 
 .task-info-pane h3 {
@@ -1752,6 +1861,14 @@ async function handleDescriptionImages(files: File[]) {
   grid-template-columns: 600px 322px;
 }
 
+.modal-body.task-info-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.modal-body.task-info-collapsed .requirement-pane {
+  border-right: 0;
+}
+
 .requirement-pane {
   position: relative;
   box-sizing: border-box;
@@ -1759,9 +1876,24 @@ async function handleDescriptionImages(files: File[]) {
 }
 
 .requirement-title-rule {
+  display: flex;
   width: 100%;
+  align-items: flex-start;
+  gap: 16px;
   padding-bottom: 8px;
   border-bottom: 1px solid #3157e2;
+}
+
+.requirement-title-rule > h3 {
+  min-width: 0;
+  flex: 1;
+}
+
+.requirement-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
 }
 
 .requirement-summary {
@@ -1826,6 +1958,66 @@ async function handleDescriptionImages(files: File[]) {
   line-height: 24px;
 }
 
+.task-info-pane-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.task-info-pane-heading h3 {
+  margin: 0;
+}
+
+.task-info-heading-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-info-toggle {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: #5f6368;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.task-info-toggle:hover {
+  color: #3157e2;
+  background: #f0f1f3;
+}
+
+.task-info-toggle:disabled,
+.task-info-close:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.task-info-toggle:focus-visible {
+  color: #3157e2;
+  outline: 2px solid #3157e2;
+  outline-offset: 2px;
+}
+
+.task-info-toggle-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  transform: rotate(180deg);
+}
+
 .task-info-close {
   position: absolute;
   top: 12px;
@@ -1841,26 +2033,27 @@ async function handleDescriptionImages(files: File[]) {
   cursor: pointer;
 }
 
-.task-info-fullscreen {
-  position: absolute;
-  top: 8px;
-  right: 40px;
-  display: inline-flex;
-  width: 24px;
-  height: 24px;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 4px;
-  color: #8c8c8c;
-  background: transparent;
-  cursor: pointer;
-}
-.task-info-fullscreen:hover { color: #262626; background: #f2f4f7; }
-
 .task-info-close img {
   width: 100%;
   height: 100%;
+}
+
+.task-info-close--inline {
+  position: static;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.task-info-close:hover,
+.task-info-close:focus-visible {
+  background: #f3f4f6;
+}
+
+.task-info-close:focus-visible {
+  outline: 2px solid rgba(49, 87, 226, 0.3);
+  outline-offset: 2px;
 }
 
 .task-info-list {
@@ -1921,11 +2114,16 @@ async function handleDescriptionImages(files: File[]) {
 }
 
 .edit-title-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   padding-bottom: 8px;
   border-bottom: 1px solid #3157e2;
 }
 
 .edit-title-heading .title-input {
+  min-width: 0;
+  flex: 1;
   height: 32px;
   margin: 0;
   padding: 0;
@@ -2263,38 +2461,6 @@ async function handleDescriptionImages(files: File[]) {
 }
 
 
-.task-detail-modal.is-fullscreen {
-  container: task-detail / inline-size;
-}
-
-@container task-detail (max-width: 760px) {
-  .modal-body {
-    display: block;
-    overflow-y: auto;
-  }
-
-  .requirement-pane,
-  .task-info-pane {
-    overflow: visible;
-  }
-
-  .requirement-pane {
-    border-right: 0;
-  }
-
-  .task-info-pane {
-    border-top: 1px solid #f0f0f0;
-  }
-
-  .edit-requirement-pane {
-    min-height: 320px;
-  }
-
-  .expanded-fields {
-    grid-template-columns: 1fr;
-  }
-}
-
 @media (min-width: 761px) and (max-width: 954px) {
   .modal-body {
     grid-template-columns: minmax(0, 1fr) 322px;
@@ -2342,76 +2508,5 @@ async function handleDescriptionImages(files: File[]) {
   .expanded-fields {
     grid-template-columns: 1fr;
   }
-}
-</style>
-
-<style>
-body.goteams-task-fullscreen .task-detail-info-modal.ant-modal-wrap,
-.task-detail-info-modal.is-fullscreen.ant-modal-wrap {
-  position: fixed !important;
-  top: 0 !important;
-  right: 0 !important;
-  bottom: 0 !important;
-  left: 0 !important;
-  width: 100% !important;
-  height: 100% !important;
-  overflow: hidden !important;
-  text-align: start !important;
-}
-body.goteams-task-fullscreen .task-detail-info-modal::before,
-.task-detail-info-modal.is-fullscreen::before {
-  display: none !important;
-  content: none !important;
-}
-body.goteams-task-fullscreen .task-detail-info-modal .ant-modal,
-.task-detail-info-modal.is-fullscreen .ant-modal,
-.ant-modal.task-detail-dialog-fullscreen {
-  position: relative !important;
-  top: 0 !important;
-  display: flex !important;
-  width: 100% !important;
-  max-width: 100% !important;
-  height: 100% !important;
-  margin: 0 !important;
-  padding: 0 !important;
-}
-
-/* .ant-modal 与 .ant-modal-content 之间还存在一层无类名的内容包裹层（其后是 antd 的
-   焦点哨兵 div）。全屏时只给 .ant-modal-content 设 flex，这层包裹层仍会按 width:0
-   收缩，导致整块弹窗内容被压成 0 宽、画面只剩遮罩。这里让包裹层撑满并把高度继续向内传递。 */
-.task-detail-info-modal.is-fullscreen .ant-modal > div:first-child {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  height: 100%;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-}
-.task-detail-info-modal.is-fullscreen .ant-modal-content,
-.task-detail-info-modal.is-fullscreen .ant-modal-body,
-.task-detail-info-modal.is-fullscreen .task-detail-modal {
-  display: flex;
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  border-radius: 0;
-}
-.task-detail-info-modal.is-fullscreen .modal-body {
-  height: auto !important;
-  min-height: 0;
-  max-height: none !important;
-  flex: 1;
-  grid-template-columns: minmax(0, 1fr) 322px;
-}
-.task-detail-info-modal.is-fullscreen .description-box,
-.task-detail-info-modal.is-fullscreen .markdown-editor,
-.task-detail-info-modal.is-fullscreen .vditor,
-.task-detail-info-modal.is-fullscreen .vditor-content,
-.task-detail-info-modal.is-fullscreen .vditor-ir {
-  height: 100% !important;
-  min-height: 0;
 }
 </style>

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -36,8 +37,8 @@ type cliDefinition struct {
 }
 
 // cliDefinitions returns the CLI definitions to probe on this machine.
-// 候选可执行名统一取自 cliExecutableNames，与执行期 ResolveCLIExecutable 同源，
-// 避免探测名与执行名不一致（例如 cursor 的 agent / cursor-agent）。
+// 候选可执行名统一取自 cliExecutableNames，与执行期 ResolveCLIExecutable 同源。
+// Cursor CLI 例外：官方命令是 agent，解析时还要排除 Grok 的同名命令。
 func cliDefinitions() []cliDefinition {
 	return []cliDefinition{
 		{
@@ -65,13 +66,9 @@ func cliDefinitions() []cliDefinition {
 			ModelResolver: resolveOpenCodeModels,
 		},
 		{
-			Type:        CLITypeCursor,
-			Name:        "Cursor Agent",
-			Executables: cliExecutableNames(CLITypeCursor),
-			// 注意：不能用 `agent` 探测——xAI 官方 grok 安装器会把
-			// `~/.grok/bin/agent` 软链到 `~/.local/bin/agent`，抢占该命令名，
-			// 导致探测到 grok 的二进制。Cursor 安装脚本同时提供 cursor-agent，
-			// 该名字唯一无歧义。
+			Type:          CLITypeCursor,
+			Name:          "Cursor CLI",
+			Executables:   cliExecutableNames(CLITypeCursor),
 			ModelResolver: resolveCursorModels,
 		},
 		{
@@ -140,6 +137,12 @@ func cliDefinitions() []cliDefinition {
 			Executables:   cliExecutableNames(CLITypePi),
 			ModelResolver: resolvePiModels,
 		},
+		{
+			Type:          CLITypeAntigravity,
+			Name:          "Antigravity CLI",
+			Executables:   cliExecutableNames(CLITypeAntigravity),
+			ModelResolver: resolveAntigravityModels,
+		},
 	}
 }
 
@@ -149,26 +152,30 @@ func cliDefinitions() []cliDefinition {
 // models of every installed CLI and persists them to clis.json/models.json).
 func DiscoverCLIs(ctx context.Context) []DiscoveredCLI {
 	defs := cliDefinitions()
-	results := make([]DiscoveredCLI, 0, len(defs))
-	for _, def := range defs {
-		item := DiscoveredCLI{
-			Type:   def.Type,
-			Name:   def.Name,
-			Models: []string{},
-		}
-
-		execPath := lookupExecutable(def.Executables)
-		if execPath == "" {
-			results = append(results, item)
-			continue
-		}
-
-		item.Installed = true
-		item.ExecPath = execPath
-		item.Version = detectVersion(ctx, execPath)
-
-		results = append(results, item)
+	results := make([]DiscoveredCLI, len(defs))
+	var wg sync.WaitGroup
+	// 限制版本探测并发，避免某个慢 CLI 把整张列表串行拖住。
+	workers := make(chan struct{}, 4)
+	for index, def := range defs {
+		results[index] = DiscoveredCLI{Type: def.Type, Name: def.Name, Models: []string{}}
+		wg.Add(1)
+		go func(index int, def cliDefinition) {
+			defer wg.Done()
+			select {
+			case workers <- struct{}{}:
+				defer func() { <-workers }()
+			case <-ctx.Done():
+				return
+			}
+			execPath, _ := ResolveCLIExecutable(def.Type)
+			if execPath != "" {
+				results[index].Installed = true
+				results[index].ExecPath = execPath
+				results[index].Version = detectVersion(ctx, execPath)
+			}
+		}(index, def)
 	}
+	wg.Wait()
 	return results
 }
 
@@ -180,7 +187,7 @@ func DiscoverCLIModels(ctx context.Context, cliType string) []string {
 		if def.Type != cliType {
 			continue
 		}
-		execPath := lookupExecutable(def.Executables)
+		execPath, _ := ResolveCLIExecutable(cliType)
 		if execPath == "" {
 			return []string{}
 		}
@@ -196,23 +203,42 @@ func DiscoverCLIModels(ctx context.Context, cliType string) []string {
 }
 
 // knownExecutableSearchDirs are extra directories to probe when PATH lookup fails.
-// Some installers (e.g. Cursor Agent) add their bin dir only to the interactive
-// shell's PATH, so a long-running backend process may not resolve the binary via
-// LookPath even though it works in a user's terminal. We probe the well-known
-// install location with platform executable extensions as a fallback.
+// GUI and dev sidecars often do not inherit the shell PATH. These are the stable
+// installer entry points already verified for the desktop fallback, not version trees.
 var knownExecutableSearchDirs = func() []string {
-	dirs := make([]string, 0, 8)
-	if la := os.Getenv("LOCALAPPDATA"); la != "" {
-		dirs = append(dirs, filepath.Join(la, "cursor-agent"))
-	}
-	if hd, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(hd, "AppData", "Local", "cursor-agent"))
-	}
-	for _, pf := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), os.Getenv("ProgramW6432")} {
-		if pf == "" {
-			continue
+	dirs := make([]string, 0, 12)
+	if runtime.GOOS == "windows" {
+		if la := os.Getenv("LOCALAPPDATA"); la != "" {
+			dirs = append(dirs, filepath.Join(la, "cursor-agent"))
+			dirs = append(dirs, filepath.Join(la, "agy", "bin"))
 		}
-		dirs = append(dirs, filepath.Join(pf, "cursor-agent"))
+		if hd, err := os.UserHomeDir(); err == nil {
+			dirs = append(dirs, filepath.Join(hd, "AppData", "Local", "cursor-agent"))
+			dirs = append(dirs, filepath.Join(hd, "AppData", "Local", "agy", "bin"))
+		}
+		for _, pf := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), os.Getenv("ProgramW6432")} {
+			if pf == "" {
+				continue
+			}
+			dirs = append(dirs, filepath.Join(pf, "cursor-agent"))
+			dirs = append(dirs, filepath.Join(pf, "Google", "antigravity-cli"))
+		}
+		return dirs
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return dirs
+	}
+	// Antigravity CLI 安装脚本把 agy 放到 ~/.local/bin，且不保证 sidecar 进程的 PATH 已包含它。
+	dirs = append(dirs,
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, ".opencode", "bin"),
+		filepath.Join(home, ".kimi-code", "bin"),
+		filepath.Join(home, ".grok", "bin"),
+		filepath.Join(home, ".pi", "agent", "bin"),
+	)
+	if runtime.GOOS == "darwin" {
+		dirs = append(dirs, "/opt/homebrew/bin", "/usr/local/bin")
 	}
 	return dirs
 }()
@@ -230,7 +256,7 @@ func ResolveVibeCodingExecutable(tool string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "codex_cli":
 		names = cliExecutableNames(CLITypeCodex)
-	case CLITypeClaude, CLITypeCodeBuddy, CLITypeQoder, CLITypePi:
+	case CLITypeClaude, CLITypeCodeBuddy, CLITypeQoder, CLITypePi, CLITypeAntigravity:
 		names = cliExecutableNames(tool)
 	default:
 		return "", fmt.Errorf("Vibe Coding 工具无效")
@@ -243,6 +269,12 @@ func ResolveVibeCodingExecutable(tool string) (string, error) {
 }
 
 func ResolveCLIExecutable(cliType string) (string, error) {
+	if cliType == CLITypeCursor {
+		if execPath := findCursorCLI(); execPath != "" {
+			return execPath, nil
+		}
+		return "", fmt.Errorf("未找到 Cursor CLI，请先安装并加入 PATH")
+	}
 	names := cliExecutableNames(cliType)
 	if len(names) == 0 {
 		return "", fmt.Errorf("CLI 类型无效: %q", cliType)
@@ -299,11 +331,9 @@ func cliExecutableNames(cliType string) []string {
 	case CLITypeOpenCode:
 		return []string{"opencode"}
 	case CLITypeCursor:
-		// Cursor 安装脚本同时提供 `agent` 与 `cursor-agent` 两个入口，但
-		// xAI 官方 grok 的安装器会把 `~/.grok/bin/agent` 软链到
-		// `~/.local/bin/agent`，抢占 `agent` 这个名字——因此这里必须用
-		// 唯一无歧义的 `cursor-agent`，与 cliDefinitions 的探测名保持一致。
-		return []string{"cursor-agent"}
+		// 官方 Cursor CLI 的命令是 agent（cursor.com/install，默认 ~/.local/bin）。
+		// 实际解析走 findCursorCLI，不能对 agent 做 PATH 查找：Grok 也占用这个名字。
+		return []string{"agent"}
 	case CLITypeCopilot:
 		return []string{"copilot"}
 	case CLITypeGrok:
@@ -318,6 +348,9 @@ func cliExecutableNames(cliType string) []string {
 		return []string{"qwen"}
 	case CLITypePi:
 		return []string{"pi"}
+	case CLITypeAntigravity:
+		// 只认 agy。同目录里的 antigravity 可能是 IDE 启动器，不能当作 CLI。
+		return []string{"agy"}
 	default:
 		return nil
 	}
@@ -338,8 +371,13 @@ func lookupExecutable(names []string) string {
 	}
 	dirs := append(persistedPathDirs(), knownExecutableSearchDirs...)
 	for _, dir := range dirs {
+		// Windows 上 .exe 优先于 .cmd，且不回退到无扩展名脚本。
+		exts := []string{""}
+		if runtime.GOOS == "windows" {
+			exts = []string{".exe", ".com", ".cmd", ".bat"}
+		}
 		for _, name := range names {
-			for _, ext := range []string{"", ".exe", ".cmd", ".bat"} {
+			for _, ext := range exts {
 				candidate := filepath.Join(dir, name+ext)
 				if isExecutableFile(candidate) {
 					return candidate
@@ -350,13 +388,80 @@ func lookupExecutable(names []string) string {
 	return ""
 }
 
+// findCursorCLI 只接受官方 Cursor CLI 的 agent 入口。
+// PATH 上的 agent 可能是 Grok；cursor 命令是 IDE 垫片，直接执行不会进入 CLI。
+func findCursorCLI() string {
+	return firstCursorCLI(cursorCLICandidates())
+}
+
+func cursorCLICandidates() []string {
+	var candidates []string
+	if runtime.GOOS == "windows" {
+		add := func(dir string) {
+			if dir == "" {
+				return
+			}
+			for _, name := range []string{"agent.exe", "agent.cmd", "agent.bat", "agent"} {
+				candidates = append(candidates, filepath.Join(dir, name))
+			}
+		}
+		if la := os.Getenv("LOCALAPPDATA"); la != "" {
+			add(filepath.Join(la, "cursor-agent"))
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			add(filepath.Join(home, "AppData", "Local", "cursor-agent"))
+		}
+		for _, pf := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), os.Getenv("ProgramW6432")} {
+			add(filepath.Join(pf, "cursor-agent"))
+		}
+		return candidates
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".local", "bin", "agent"))
+	}
+	for _, dir := range append(persistedPathDirs(), knownExecutableSearchDirs...) {
+		candidates = append(candidates, filepath.Join(dir, "agent"))
+	}
+	return candidates
+}
+
+func firstCursorCLI(candidates []string) string {
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		if isCursorCLI(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// isCursorCLI 确认 agent 指向官方安装包，而不是 Grok 的同名命令。
+func isCursorCLI(path string) bool {
+	if !isExecutableFile(path) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		resolved = path
+	}
+	resolved = strings.ToLower(filepath.ToSlash(resolved))
+	if strings.Contains(resolved, "/.grok/") || strings.Contains(resolved, "grok-") {
+		return false
+	}
+	return strings.Contains(resolved, "cursor-agent")
+}
+
 // isExecutableFile reports whether path exists and is a regular file.
 func isExecutableFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
-	return !info.IsDir()
+	return info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode().Perm()&0111 != 0)
 }
 
 // detectVersion gets the CLI version number
@@ -364,8 +469,7 @@ func detectVersion(ctx context.Context, execPath string) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "--version")
-	output, err := cmd.CombinedOutput()
+	output, err := runCLIProbe(ctx, execPath, true, "--version")
 	if err != nil {
 		return ""
 	}
@@ -382,8 +486,7 @@ func resolveOpenCodeModels(ctx context.Context, execPath string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "models")
-	output, err := cmd.Output()
+	output, err := runCLIProbe(ctx, execPath, false, "models")
 	if err != nil {
 		return []string{}
 	}
@@ -417,8 +520,7 @@ func resolveCursorModels(ctx context.Context, execPath string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "models")
-	output, err := cmd.Output()
+	output, err := runCLIProbe(ctx, execPath, false, "models")
 	if err != nil {
 		// `agent models` can fail when the Cursor CLI is not logged in, is still
 		// starting up, or the executable is a wrapper whose sub-process output is
@@ -708,8 +810,7 @@ func resolveModelsFromHelp(ctx context.Context, execPath string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "--help")
-	output, err := cmd.CombinedOutput()
+	output, err := runCLIProbe(ctx, execPath, true, "--help")
 	if err != nil {
 		return nil
 	}
@@ -782,8 +883,7 @@ func parseCopilotModelsFromHelpConfig(ctx context.Context, execPath string) []st
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "help", "config")
-	output, err := cmd.CombinedOutput()
+	output, err := runCLIProbe(ctx, execPath, true, "help", "config")
 	if err != nil {
 		return nil
 	}
@@ -876,8 +976,7 @@ func resolveGrokModels(ctx context.Context, execPath string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "models")
-	output, err := cmd.Output()
+	output, err := runCLIProbe(ctx, execPath, false, "models")
 	if err == nil {
 		if models := parseGrokModelOutput(string(output)); len(models) > 0 {
 			return models
@@ -1098,8 +1197,7 @@ func resolveKimiModels(ctx context.Context, execPath string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "provider", "list", "--json")
-	output, err := cmd.Output()
+	output, err := runCLIProbe(ctx, execPath, false, "provider", "list", "--json")
 	if err == nil {
 		var parsed kimiModelsOutput
 		if json.Unmarshal(output, &parsed) == nil && len(parsed.Models) > 0 {
@@ -1152,8 +1250,7 @@ func resolveQoderModels(ctx context.Context, execPath string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "--list-models")
-	output, err := cmd.Output()
+	output, err := runCLIProbe(ctx, execPath, false, "--list-models")
 	if err != nil {
 		return qoderMergeSettingsModels(nil)
 	}
@@ -1401,8 +1498,7 @@ func resolveOpenClawModels(ctx context.Context, execPath string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "models", "list", "--json")
-	output, err := cmd.Output()
+	output, err := runCLIProbe(ctx, execPath, false, "models", "list", "--json")
 	if err != nil {
 		return openclawStaticModels()
 	}
@@ -1550,8 +1646,7 @@ func resolvePiModels(ctx context.Context, execPath string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, execPath, "--list-models")
-	output, err := cmd.Output()
+	output, err := runCLIProbe(ctx, execPath, false, "--list-models")
 	if err == nil {
 		if models := parsePiModelOutput(string(output)); len(models) > 0 {
 			return models
@@ -1602,5 +1697,122 @@ func piStaticModels() []string {
 		"opencode/claude-opus-5",
 		"pixel/gpt-5.6-terra",
 		"pixel/gpt-5.6-sol",
+	}
+}
+
+// resolveAntigravityModels 通过 `agy models` 读取模型 slug。
+// 命令需要已登录；失败时回退到一小份内置目录，避免选择器为空。
+func resolveAntigravityModels(ctx context.Context, execPath string) []string {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	cmd := osexec.CommandContext(ctx, execPath, "models")
+	output, err := cmd.Output()
+	if err == nil {
+		if models := parseAntigravityModelOutput(string(output)); len(models) > 0 {
+			return models
+		}
+	}
+	return antigravityStaticModels()
+}
+
+// parseAntigravityModelOutput 解析 `agy models` 的文本或 JSON。
+// 文本每行是「slug 加至少两个空格 再加展示名」。
+func parseAntigravityModelOutput(output string) []string {
+	trimmed := strings.TrimSpace(output)
+	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+		if models := parseAntigravityModelJSON(trimmed); len(models) > 0 {
+			return models
+		}
+	}
+
+	var models []string
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := stripANSI(strings.TrimSpace(scanner.Text()))
+		if line == "" || strings.HasPrefix(strings.ToLower(line), "available") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		id := antigravityModelID(line)
+		if antigravityModelSlug(id) {
+			models = append(models, id)
+		}
+	}
+	return dedup(models)
+}
+
+func parseAntigravityModelJSON(raw string) []string {
+	var list []json.RawMessage
+	if json.Unmarshal([]byte(raw), &list) != nil {
+		var wrapped struct {
+			Models []json.RawMessage `json:"models"`
+		}
+		if json.Unmarshal([]byte(raw), &wrapped) != nil || len(wrapped.Models) == 0 {
+			return nil
+		}
+		list = wrapped.Models
+	}
+	var models []string
+	for _, item := range list {
+		var slug string
+		if json.Unmarshal(item, &slug) == nil && antigravityModelSlug(strings.TrimSpace(slug)) {
+			models = append(models, strings.TrimSpace(slug))
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(item, &obj) != nil {
+			continue
+		}
+		for _, field := range []string{"id", "slug", "model", "name"} {
+			var value string
+			if json.Unmarshal(obj[field], &value) != nil {
+				continue
+			}
+			value = strings.TrimSpace(value)
+			if field == "name" && strings.ContainsAny(value, " \t") {
+				continue
+			}
+			if antigravityModelSlug(value) {
+				models = append(models, value)
+				break
+			}
+		}
+	}
+	return dedup(models)
+}
+
+func antigravityModelID(line string) string {
+	for i := 0; i < len(line)-1; i++ {
+		if (line[i] == ' ' || line[i] == '\t') && (line[i+1] == ' ' || line[i+1] == '\t') {
+			return strings.TrimSpace(line[:i])
+		}
+	}
+	return strings.TrimSpace(line)
+}
+
+func antigravityModelSlug(id string) bool {
+	if id == "" || strings.ContainsAny(id, " \t/\\") {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-' || r == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// antigravityStaticModels 是 `agy models` 无法查询时的兜底。
+// 线上目录会变，探测成功时不使用这份列表。
+func antigravityStaticModels() []string {
+	return []string{
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-medium",
+		"gemini-3.1-pro-high",
+		"claude-sonnet-4-6",
+		"claude-opus-4-6-thinking",
 	}
 }

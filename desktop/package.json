@@ -1,8 +1,8 @@
 {
   "name": "goteams-client-desktop",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
-  "description": "TeamsBoard Electron desktop shell",
+  "description": "TeamBuddy Electron desktop shell",
   "author": "TeamsBoard",
   "main": "main/index.cjs",
   "scripts": {

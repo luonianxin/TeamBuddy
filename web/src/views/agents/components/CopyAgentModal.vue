@@ -230,8 +230,6 @@ async function copy() {
 .agent-list__scroll {
   max-height: 627px;
   overflow-y: auto;
-  scrollbar-color: #d8dde5 transparent;
-  scrollbar-width: thin;
 }
 
 .agent-list-item {

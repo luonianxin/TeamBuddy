@@ -10,6 +10,14 @@ export interface TaskBoardLane {
 
 export type BoardLayoutMode = 'board' | 'list'
 
+export interface TaskBoardListResponse {
+  items: TaskBoardTask[]
+  total: number
+  page: number
+  page_size: number
+  status_counts: Record<string, number>
+}
+
 export type BoardListActionKind = 'configure' | 'detail'
 
 export interface BoardListAction {

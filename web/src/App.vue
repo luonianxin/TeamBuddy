@@ -5,15 +5,23 @@ import { themeConfig } from '@/config/theme'
 import { stopLocaleSync } from '@/i18n'
 import { useUpdateStore } from '@/stores/update'
 import { useLocale } from '@/composables/useLocale'
+import { isWindowsDesktopRuntime } from '@/composables/useDesktop'
 
 const { antLocale } = useLocale()
 const updateStore = useUpdateStore()
 const DesktopUpdateModal = defineAsyncComponent(() => import('@/components/DesktopUpdateModal.vue'))
 
-// 检查更新不影响登录和工作区启动；桌面主进程负责缓存和请求。
-onMounted(() => { void updateStore.check(false).catch(() => {}) })
+// Windows 原生标题栏按钮位于 Web 内容之上；给所有 Portal 弹层提供统一安全区标记。
+onMounted(() => {
+  document.body.classList.toggle('goteams-windows-desktop', isWindowsDesktopRuntime())
+  void updateStore.check(false).catch(() => {})
+})
 
-onUnmounted(() => { stopLocaleSync(); updateStore.dispose() })
+onUnmounted(() => {
+  document.body.classList.remove('goteams-windows-desktop')
+  stopLocaleSync()
+  updateStore.dispose()
+})
 </script>
 
 <template>

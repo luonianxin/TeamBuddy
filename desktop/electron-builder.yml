@@ -1,5 +1,5 @@
 appId: cn.goteams.client
-productName: TeamsBoard
+productName: TeamBuddy
 asar: true
 
 directories:
@@ -8,7 +8,7 @@ directories:
 # 浏览器登录的回调协议：GoTeams 登录确认页通过 teamsboard://auth/callback 唤起客户端。
 # 改动这里必须同步 desktop/main/deep-link.cjs 与 internal/cloud/browserlogin.go。
 protocols:
-  - name: TeamsBoard
+  - name: TeamBuddy
     schemes:
       - teamsboard
 
@@ -17,12 +17,17 @@ files:
   - preload/**/*
   - shared/**/*
   - build/icon.png
+  - build/icon-macos.png
+  - build/icon-windows.png
+  - build/trayTemplate.png
+  - build/trayTemplate@2x.png
   - package.json
 
 win:
   icon: build/icon.ico
   target:
     - nsis
+  # 保留历史发布资产名，确保旧版客户端仍能发现并升级到更名后的版本。
   artifactName: "TeamsBoard-windows-${arch}.${ext}"
   extraResources:
     - from: resources/backend
@@ -31,10 +36,11 @@ win:
         - client.exe
 
 mac:
-  icon: build/icon.png
+  icon: build/icon-macos.png
   target:
     - dmg
   category: public.app-category.developer-tools
+  # 保留历史发布资产名，确保旧版客户端仍能发现并升级到更名后的版本。
   artifactName: "TeamsBoard-macos-${arch}.${ext}"
   extraResources:
     - from: resources/backend
@@ -49,4 +55,4 @@ nsis:
   # electron-builder 为开始菜单快捷方式写入与 Main 一致的 AppUserModelID，
   # Windows Toast 需要此安装身份；不要用复制出来的裸 exe 验收通知。
   createStartMenuShortcut: true
-  shortcutName: TeamsBoard
+  shortcutName: TeamBuddy

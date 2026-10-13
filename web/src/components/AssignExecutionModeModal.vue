@@ -114,7 +114,14 @@
             :disabled="saving || cliModeLocked"
             :dropdown-style="selectDropdownStyle"
             @change="chooseCLIType"
-          />
+          >
+            <template #option="{ label, value, modelCount }">
+              <span class="assign-cli-option">
+                <span class="assign-cli-option__name">{{ label ?? value }}</span>
+                <span class="assign-cli-option__count">{{ modelCount ?? '…' }}</span>
+              </span>
+            </template>
+          </a-select>
           <a-select
             class="assign-runtime__select"
             :value="selectedMode === 'cli' ? selectedModelName || undefined : undefined"
@@ -405,8 +412,10 @@ const {
   cliOptions,
   loadCliOptions,
   loadModelOptions,
+  modelCounts,
   modelLoading,
   modelOptions,
+  prefetchModelCounts,
 } = useCliModelOptions()
 
 const availableCliOptions = computed(() => cliOptions.value.filter((cli) => cli.installed))
@@ -414,12 +423,18 @@ const cliSelectOptions = computed(() => {
   const items = cliOptions.value.map((cli) => ({
     value: cli.type,
     label: cli.name,
+    modelCount: modelCounts.value[cli.type],
     disabled: !cli.installed,
   }))
   // 已指派任务的 CLI 可能来自其他设备（本机未安装），保留可回显。
   const current = props.initialCliType
   if (current && !items.some((item) => item.value === current)) {
-    items.unshift({ value: current, label: current, disabled: false })
+    items.unshift({
+      value: current,
+      label: current,
+      modelCount: modelCounts.value[current],
+      disabled: false,
+    })
   }
   return items
 })
@@ -688,6 +703,13 @@ watch(
     if (cliResult.status === 'fulfilled' && selectedMode.value === 'cli' && selectedTarget.value) {
       void loadModelOptions(selectedTarget.value)
     }
+    if (cliResult.status === 'fulfilled') {
+      const cliTypes = cliOptions.value.map((cli) => cli.type)
+      if (props.initialCliType && !cliTypes.includes(props.initialCliType)) {
+        cliTypes.unshift(props.initialCliType)
+      }
+      void prefetchModelCounts(cliTypes)
+    }
     codexCapability.value = codexResult.status === 'fulfilled'
       ? codexResult.value
       : { available: false, message: t('workflows.task.codex.capabilityUnavailable') }
@@ -948,6 +970,29 @@ watch(
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 12px;
+}
+
+.assign-cli-option {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.assign-cli-option__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assign-cli-option__count {
+  flex: 0 0 auto;
+  color: #7a8699;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
 }
 
 .assign-model-option {

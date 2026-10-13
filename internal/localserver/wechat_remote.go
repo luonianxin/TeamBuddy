@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"goteams-client/internal/applog"
 	"goteams-client/internal/i18n"
 	"goteams-client/internal/secrets"
+	builtinskills "goteams-client/internal/skills"
 	"goteams-client/internal/workflow"
 )
 
@@ -30,14 +32,17 @@ const (
 )
 
 type wechatState struct {
-	BotID           string
-	SenderID        string
-	Locale          string
-	BaseURL         string
-	Cursor          string
-	BoundTaskUUID   string
-	ContextRevision int64
-	ConnectedAt     int64
+	BotID                 string
+	SenderID              string
+	Locale                string
+	BaseURL               string
+	Cursor                string
+	BoundTaskUUID         string
+	PendingCancelTaskUUID string
+	PendingResumeTaskUUID string
+	PendingDoneTaskUUID   string
+	ContextRevision       int64
+	ConnectedAt           int64
 }
 
 type wechatLoginAttempt struct {
@@ -63,12 +68,19 @@ type wechatPendingFinish struct {
 }
 
 type wechatRemote struct {
-	db           *sql.DB
-	store        secrets.Store
-	orchestrator *workflow.Orchestrator
-	tasks        *TasksHandler
-	api          *wechatAPI
-	mu           sync.Mutex
+	db              *sql.DB
+	store           secrets.Store
+	orchestrator    *workflow.Orchestrator
+	tasks           *TasksHandler
+	taskRoot        string
+	vibeImBotSkills map[string]VibeImBotSkillStatus
+	// skillSurface 暴露 lookup / write 等共用能力（计划 §四）。
+	// nil 时 wechat 通道仍可继续工作，仅本地快路径指令会被引导到 CLI 兜底。
+	skillSurface *SkillSurface
+	// accountSession 提供当前云登录态的账号会话（与 validateSession 同一回退口径）。
+	accountSession func() *browserSession
+	api            *wechatAPI
+	mu             sync.Mutex
 	// A disconnect waits for an accepted command to finish its local handoff.
 	dispatchMu            sync.RWMutex
 	attempt               *wechatLoginAttempt
@@ -85,10 +97,42 @@ type wechatRemote struct {
 	updatesPollTimeout    time.Duration
 }
 
-func newWeChatRemote(db *sql.DB, store secrets.Store, orchestrator *workflow.Orchestrator, tasks *TasksHandler) *wechatRemote {
-	return &wechatRemote{db: db, store: store, orchestrator: orchestrator, tasks: tasks, api: newWeChatAPI(),
+func newWeChatRemote(db *sql.DB, store secrets.Store, orchestrator *workflow.Orchestrator, tasks *TasksHandler, taskRoot string, vibeImBotSkills map[string]VibeImBotSkillStatus) *wechatRemote {
+	return &wechatRemote{db: db, store: store, orchestrator: orchestrator, tasks: tasks, taskRoot: taskRoot,
+		vibeImBotSkills: vibeImBotSkills, api: newWeChatAPI(),
 		codexMonitors: make(map[string]struct{}), wake: make(chan struct{}, 1), qrStatusTimeout: wechatQRStatusTimeout,
 		updatesPollTimeout: wechatUpdatesPollTimeout}
+}
+
+// attachSkillSurface 在 server.go 完成 SkillSurface 装配后注入，避免反向依赖。
+func (w *wechatRemote) attachSkillSurface(s *SkillSurface) {
+	if w == nil || s == nil {
+		return
+	}
+	w.skillSurface = s
+}
+
+// attachAccountSession 把账号会话 getter 透传给 SkillSurface，替代永久为空的
+// wechatSessionKey —— 后者全仓无任何写入点，导致 /tt 等依赖会话的快路径恒提示未登录。
+// getter 由 server.go 用 currentSession() + sessionMatchesConfig() 合成，与 validateSession 同一回退口径。
+func (w *wechatRemote) attachAccountSession(getter func() *browserSession) {
+	if w == nil {
+		return
+	}
+	w.accountSession = getter
+}
+
+// imBotCLISkillPath 返回当前 cliType 对应的 teamsboard-im-bot-cli Skill 绝对路径。
+// 未安装或 cliType 未知时返回空字符串，调用方在 prompt 中按名称引导 CLI 加载。
+func (w *wechatRemote) imBotCLISkillPath(cliType string) string {
+	if w.vibeImBotSkills == nil {
+		return ""
+	}
+	status, ok := w.vibeImBotSkills[strings.ToLower(strings.TrimSpace(cliType))]
+	if !ok || !status.Ready {
+		return ""
+	}
+	return filepath.Join(status.Root, builtinskills.ImBotCLISkillName, "SKILL.md")
 }
 
 func (w *wechatRemote) registerRoutes(r *gin.RouterGroup) {
@@ -99,6 +143,9 @@ func (w *wechatRemote) registerRoutes(r *gin.RouterGroup) {
 	r.GET("/wechat/login/:id", w.getLogin)
 	r.POST("/wechat/login/:id/verify", w.verifyLogin)
 	r.DELETE("/wechat", w.disconnect)
+	// S-BE001: CLI 配置 API 路由
+	r.GET("/wechat/cli-config", w.getCLIConfig)
+	r.PUT("/wechat/cli-config", w.saveCLIConfig)
 }
 
 func (w *wechatRemote) start(ctx context.Context) {
@@ -170,13 +217,23 @@ func (w *wechatRemote) signal() {
 func (w *wechatRemote) readState(ctx context.Context) (wechatState, error) {
 	var state wechatState
 	err := w.db.QueryRowContext(ctx, `SELECT bot_id, sender_id, locale, base_url, cursor, bound_task_uuid,
+		pending_cancel_task_uuid, pending_resume_task_uuid, pending_done_task_uuid,
 		context_revision, connected_at FROM gt_remote_wechat_state WHERE id=1`).Scan(
 		&state.BotID, &state.SenderID, &state.Locale, &state.BaseURL, &state.Cursor, &state.BoundTaskUUID,
+		&state.PendingCancelTaskUUID, &state.PendingResumeTaskUUID, &state.PendingDoneTaskUUID,
 		&state.ContextRevision, &state.ConnectedAt)
 	return state, err
 }
 
-func remoteExecutionBlock(ctx context.Context, db *sql.DB, taskUUID string) (string, error) {
+// isConnectedState 判断微信通道是否已真正连接。
+// 必须同时校验 BotID 与 ConnectedAt，避免仅有空 state 行（未连接时被创建）时误判为已连接。
+func isConnectedState(state wechatState, err error) bool {
+	return err == nil && state.BotID != "" && state.ConnectedAt > 0
+}
+
+func remoteExecutionBlock(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, taskUUID string) (string, error) {
 	var status string
 	err := db.QueryRowContext(ctx, `SELECT status FROM gt_remote_wechat_inbox
 		WHERE task_uuid=? AND status IN ('processing','dispatched','uncertain')
@@ -212,6 +269,7 @@ func (w *wechatRemote) tr(ctx context.Context, key string, params i18n.Params) s
 	return i18n.FormatWithLocale(state.Locale, key, params)
 }
 
+// S-BE001: getStatus 扩展，返回 CLI 默认配置
 func (w *wechatRemote) getStatus(c *gin.Context) {
 	state, err := w.readState(c.Request.Context())
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -228,13 +286,22 @@ func (w *wechatRemote) getStatus(c *gin.Context) {
 	}
 	w.mu.Unlock()
 	status := "disconnected"
-	if err == nil {
+	if err == nil && state.ConnectedAt > 0 {
 		status = "connected"
 	} else if loginID != "" && loginStatus != "expired" && loginStatus != "error" {
 		status = "connecting"
 	}
-	c.JSON(http.StatusOK, gin.H{"status": status, "connected_at": state.ConnectedAt, "login_id": loginID,
-		"last_error": lastError, "reply_message_id_missing": status == "connected" && replyMessageIDMissing})
+	// S-BE001: 返回 CLI 默认配置，从独立 cli_config 表读取，不依赖 state 连接状态
+	cliCfg := w.readChannelCLIConfig(c.Request.Context(), "wechat")
+	c.JSON(http.StatusOK, gin.H{
+		"status":                   status,
+		"connected_at":             state.ConnectedAt,
+		"login_id":                 loginID,
+		"last_error":               lastError,
+		"reply_message_id_missing": status == "connected" && replyMessageIDMissing,
+		"cli_default_type":         cliCfg.CLICType,
+		"cli_default_model":        cliCfg.CLIModel,
+	})
 }
 
 func (w *wechatRemote) listUncertain(c *gin.Context) {
@@ -290,10 +357,10 @@ func (w *wechatRemote) ackUncertain(c *gin.Context) {
 }
 
 func (w *wechatRemote) startLogin(c *gin.Context) {
-	if _, err := w.readState(c.Request.Context()); err == nil {
+	if state, err := w.readState(c.Request.Context()); isConnectedState(state, err) {
 		i18n.Error(c, http.StatusConflict, "remote_wechat_connected", "wechat_connected")
 		return
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		i18n.Error(c, http.StatusInternalServerError, "remote_wechat_state_error", "wechat_state_error")
 		return
 	}
@@ -312,12 +379,12 @@ func (w *wechatRemote) startLogin(c *gin.Context) {
 	attempt := &wechatLoginAttempt{ID: uuid.NewString(), QRCode: qr.QRCode, ImageDataURL: "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), Status: "waiting", BaseURL: wechatDefaultBaseURL, Locale: locale, CreatedAt: time.Now(), Cancel: cancel, Wake: make(chan struct{}, 1)}
 	w.mu.Lock()
 	// A different login may have completed while getQR was in flight.
-	if _, err := w.readState(c.Request.Context()); err == nil {
+	if state, err := w.readState(c.Request.Context()); isConnectedState(state, err) {
 		w.mu.Unlock()
 		cancel()
 		i18n.Error(c, http.StatusConflict, "remote_wechat_connected", "wechat_connected")
 		return
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		w.mu.Unlock()
 		cancel()
 		i18n.Error(c, http.StatusInternalServerError, "remote_wechat_state_error", "wechat_state_error")
@@ -500,11 +567,11 @@ func (w *wechatRemote) completeLogin(attempt *wechatLoginAttempt, status wechatQ
 		return
 	}
 	// Do not replace credentials belonging to a connection that won the login race.
-	if _, err = w.readState(context.Background()); err == nil {
+	if state, err := w.readState(context.Background()); isConnectedState(state, err) {
 		attempt.Status = "error"
 		attempt.Error = i18n.WithLocale(attempt.Locale, "remote_wechat_connected")
 		return
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		attempt.Status = "error"
 		attempt.Error = i18n.WithLocale(attempt.Locale, "remote_wechat_connect_failed")
 		return
@@ -617,7 +684,8 @@ func (w *wechatRemote) clearConnection(ctx context.Context, expected *wechatStat
 		return notified, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM gt_remote_wechat_state WHERE id=1`); err == nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE gt_remote_wechat_state SET bot_id='', sender_id='', cursor='', bound_task_uuid='',
+		context_revision=0, connected_at=0, base_url='', locale='' WHERE id=1`); err == nil {
 		_, err = tx.ExecContext(ctx, `UPDATE gt_remote_wechat_outbox SET status='cancelled' WHERE status='pending'`)
 	}
 	if err == nil {
@@ -659,8 +727,10 @@ func (w *wechatRemote) clearConnection(ctx context.Context, expected *wechatStat
 func (w *wechatRemote) pollLoop(ctx context.Context) {
 	announcedConnection := ""
 	for ctx.Err() == nil {
+		// S-BE001-fix: 用 isConnectedState 判断连接状态，避免仅有空 state 行（未连接时
+		// saveCLIConfig upsert 产生的占位行）时反复 setError 推送凭据缺失提示。
 		state, err := w.readState(ctx)
-		if err != nil {
+		if !isConnectedState(state, err) {
 			announcedConnection = ""
 			select {
 			case <-ctx.Done():
@@ -714,7 +784,7 @@ func (w *wechatRemote) pollLoop(ctx context.Context) {
 			if errors.Is(err, errWeChatSessionExpired) || (errors.As(err, &httpErr) && (httpErr.StatusCode == 401 || httpErr.StatusCode == 403)) {
 				if _, clearErr := w.clearConnection(ctx, &state, false, "wechat_session_expired"); clearErr != nil {
 					applog.Warn("清理失效微信连接失败", "error", clearErr)
-				} else if _, stateErr := w.readState(ctx); errors.Is(stateErr, sql.ErrNoRows) {
+				} else if clearedState, stateErr := w.readState(ctx); stateErr == nil && clearedState.ConnectedAt == 0 {
 					w.broadcastConnectionStatus("disconnected")
 				}
 				announcedConnection = ""
@@ -885,11 +955,11 @@ func (w *wechatRemote) enqueueTx(ctx context.Context, tx *sql.Tx, sourceID, task
 
 func (w *wechatRemote) deliverOutbox(ctx context.Context) error {
 	state, err := w.readState(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
+	// S-BE001-fix: 仅在真正已连接时尝试发送。
+	// 未连接（包括 saveCLIConfig upsert 留下的空 state 行）时直接 return，
+	// 避免 workLoop 每秒调一次都报"密钥不存在"刷屏。
+	if !isConnectedState(state, err) {
 		return nil
-	}
-	if err != nil {
-		return err
 	}
 	token, err := w.store.Get(wechatBotTokenKey)
 	if err != nil {
@@ -952,7 +1022,7 @@ func (w *wechatRemote) deliverOutbox(ctx context.Context) error {
 		if _, clearErr := w.clearConnection(ctx, &state, false, "wechat_session_expired"); clearErr != nil {
 			return clearErr
 		}
-		if _, stateErr := w.readState(ctx); errors.Is(stateErr, sql.ErrNoRows) {
+		if clearedState, stateErr := w.readState(ctx); stateErr == nil && clearedState.ConnectedAt == 0 {
 			w.broadcastConnectionStatus("disconnected")
 		}
 		return err
@@ -967,4 +1037,92 @@ func (w *wechatRemote) deliverOutbox(ctx context.Context) error {
 		return updateErr
 	}
 	return err
+}
+
+// S-BE001: getCLIConfig 获取 CLI 配置
+// @Summary 获取 CLI 配置
+// @Description 获取微信通道的 CLI 默认配置
+// @Tags remote-channels
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]string
+// @Router /api/local/remote-channels/wechat/cli-config [get]
+func (w *wechatRemote) getCLIConfig(c *gin.Context) {
+	// 读取独立 cli_config 表，不依赖 state 连接状态
+	cfg := w.readChannelCLIConfig(c.Request.Context(), "wechat")
+	c.JSON(http.StatusOK, gin.H{
+		"cli_type":  cfg.CLICType,
+		"cli_model": cfg.CLIModel,
+		"workspace": cfg.Workspace,
+		"enabled":   cfg.Enabled,
+	})
+}
+
+// channelCLIConfig 通道级别 CLI 配置，存储在独立表中，与连接状态完全解耦。
+// Enabled 独立于 cli_type/cli_model 是否填写：仅在 Enabled=true 且 cli_type 非空时
+// 才会在 dispatch 阶段作为兜底 CLI 启用。
+type channelCLIConfig struct {
+	CLICType  string
+	CLIModel  string
+	Workspace string
+	Enabled   bool
+}
+
+// readChannelCLIConfig 读取指定通道类型的 CLI 配置。
+// 记录不存在时返回空配置（Enabled 默认为 false），不会报错。
+func (w *wechatRemote) readChannelCLIConfig(ctx context.Context, channelType string) channelCLIConfig {
+	var cfg channelCLIConfig
+	_ = w.db.QueryRowContext(ctx,
+		`SELECT cli_type, cli_model, workspace, enabled FROM gt_remote_channel_cli_configs WHERE channel_type=?`,
+		channelType).Scan(&cfg.CLICType, &cfg.CLIModel, &cfg.Workspace, &cfg.Enabled)
+	return cfg
+}
+
+// saveChannelCLIConfig 保存指定通道类型的 CLI 配置（upsert）。
+func (w *wechatRemote) saveChannelCLIConfig(ctx context.Context, channelType, cliType, cliModel, workspace string, enabled bool) error {
+	now := time.Now().UnixMilli()
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	_, err := w.db.ExecContext(ctx,
+		`INSERT INTO gt_remote_channel_cli_configs (channel_type, cli_type, cli_model, workspace, enabled, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(channel_type) DO UPDATE SET
+		 	cli_type = excluded.cli_type,
+		 	cli_model = excluded.cli_model,
+		 	workspace = excluded.workspace,
+		 	enabled = excluded.enabled,
+		 	updated_at = excluded.updated_at`,
+		channelType, cliType, cliModel, workspace, enabledInt, now)
+	return err
+}
+
+// S-BE001: saveCLIConfig 保存 CLI 配置
+// @Summary 保存 CLI 配置
+// @Description 保存微信通道的 CLI 默认配置和工作目录，作为通道指令消息的兜底处理选项；可在未连接时保存
+// @Tags remote-channels
+// @Accept json
+// @Produce json
+// @Param body body struct{CLICType string `json:"cli_type"`; CLIModel string `json:"cli_model"`; Workspace string `json:"workspace"`; Enabled bool `json:"enabled"`} true "CLI配置"
+// @Success 200 {object} map[string]string
+// @Router /api/local/remote-channels/wechat/cli-config [put]
+func (w *wechatRemote) saveCLIConfig(c *gin.Context) {
+	var body struct {
+		CLICType  string `json:"cli_type"`
+		CLIModel  string `json:"cli_model"`
+		Workspace string `json:"workspace"`
+		Enabled   bool   `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		i18n.Error(c, http.StatusBadRequest, "common_request_invalid", "")
+		return
+	}
+	body.CLICType = strings.TrimSpace(body.CLICType)
+	body.CLIModel = strings.TrimSpace(body.CLIModel)
+	body.Workspace = strings.TrimSpace(body.Workspace)
+	if err := w.saveChannelCLIConfig(c.Request.Context(), "wechat", body.CLICType, body.CLIModel, body.Workspace, body.Enabled); err != nil {
+		i18n.Error(c, http.StatusInternalServerError, "remote_wechat_state_error", "wechat_state_error")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

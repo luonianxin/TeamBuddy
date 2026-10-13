@@ -84,7 +84,7 @@ const routes: RouteRecordRaw[] = [
         path: 'agents',
         name: 'agents',
         component: () => import('@/views/agents/AgentPipelines.vue'),
-        meta: { titleKey: 'routes.agents', title: 'agent员工', menu: 'agents', keepAlive: true },
+        meta: { titleKey: 'routes.agents', title: 'Agent员工', menu: 'agents', keepAlive: true },
       },
       {
         path: 'projects',

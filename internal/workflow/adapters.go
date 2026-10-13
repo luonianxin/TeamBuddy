@@ -40,6 +40,12 @@ func newAdapter(cliType string) (executor.Adapter, bool) {
 	return adapter, true
 }
 
+// NewAdapter 按 CLI 类型创建适配器，未注册的类型返回 false。
+// 这是 newAdapter 的导出版本，供外部模块调用。
+func NewAdapter(cliType string) (executor.Adapter, bool) {
+	return newAdapter(cliType)
+}
+
 // RegisteredCLITypes 返回已注册适配器的 CLI 类型，用于诊断与自检。
 func RegisteredCLITypes() []string {
 	adapterFactoriesMu.RLock()

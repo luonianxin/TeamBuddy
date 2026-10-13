@@ -23,6 +23,27 @@ export interface MenuConfigItem {
   sort_order: number
 }
 
+export const SIDEBAR_DEFAULT_WIDTH = 280
+export const SIDEBAR_MIN_WIDTH = 160
+export const SIDEBAR_MAX_WIDTH = 480
+
+const SIDEBAR_WIDTH_STORAGE_KEY = 'goteams.sidebar.width'
+
+function normalizeSidebarWidth(width: number): number {
+  if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)))
+}
+
+function readSidebarWidth(): number {
+  if (typeof window === 'undefined') return SIDEBAR_DEFAULT_WIDTH
+  try {
+    const stored = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)
+    return stored === null ? SIDEBAR_DEFAULT_WIDTH : normalizeSidebarWidth(Number(stored))
+  } catch {
+    return SIDEBAR_DEFAULT_WIDTH
+  }
+}
+
 export const useAppStore = defineStore('app', () => {
   /** Cloud connection status */
   const cloudStatus = ref<CloudStatus>('offline')
@@ -44,10 +65,23 @@ export const useAppStore = defineStore('app', () => {
     typeof window !== 'undefined' ? localStorage.getItem('goteams.sidebar.collapsed') === 'true' : false,
   )
 
+  /** Sidebar width adjusted by the user */
+  const sidebarWidth = ref(readSidebarWidth())
+
   function setSidebarCollapsed(collapsed: boolean) {
     sidebarCollapsed.value = collapsed
     try {
       localStorage.setItem('goteams.sidebar.collapsed', String(collapsed))
+    } catch {
+      // ignore
+    }
+  }
+
+  function setSidebarWidth(width: number, persist = true) {
+    sidebarWidth.value = normalizeSidebarWidth(width)
+    if (!persist) return
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth.value))
     } catch {
       // ignore
     }
@@ -118,6 +152,7 @@ export const useAppStore = defineStore('app', () => {
     menuEnabled,
     menuOrder,
     sidebarCollapsed,
+    sidebarWidth,
     setCloudStatus,
     setCliTaskCount,
     setUnreadTaskNotifications,
@@ -126,5 +161,6 @@ export const useAppStore = defineStore('app', () => {
     setMenuOrder,
     isMenuVisible,
     setSidebarCollapsed,
+    setSidebarWidth,
   }
 })

@@ -1258,19 +1258,6 @@ onBeforeUnmount(closeSocket)
   background: linear-gradient(180deg, #fbfcfe 0, #fff 130px);
 }
 
-.message-panel::-webkit-scrollbar {
-  width: 8px;
-}
-
-.message-panel::-webkit-scrollbar-thumb {
-  background: #c9d0db;
-  border-radius: 4px;
-}
-
-.message-panel::-webkit-scrollbar-thumb:hover {
-  background: #aab3c2;
-}
-
 .round-divider {
   display: flex;
   gap: 8px;

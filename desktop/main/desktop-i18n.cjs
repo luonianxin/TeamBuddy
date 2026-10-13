@@ -41,19 +41,19 @@ const MESSAGES = Object.freeze({
     'en-US': { other: 'Unable to open the system terminal' },
   },
   'tray.tooltip.starting': {
-    'zh-CN': { other: 'TeamsBoard · 正在启动' },
-    'en-US': { other: 'TeamsBoard · Starting' },
+    'zh-CN': { other: 'TeamBuddy · 正在启动' },
+    'en-US': { other: 'TeamBuddy · Starting' },
   },
   'tray.tooltip.runningTasks': {
-    'zh-CN': { other: 'TeamsBoard · {count} 个任务执行中' },
+    'zh-CN': { other: 'TeamBuddy · {count} 个任务执行中' },
     'en-US': {
-      one: 'TeamsBoard · {count} task running',
-      other: 'TeamsBoard · {count} tasks running',
+      one: 'TeamBuddy · {count} task running',
+      other: 'TeamBuddy · {count} tasks running',
     },
   },
   'tray.menu.show': {
-    'zh-CN': { other: '打开 TeamsBoard' },
-    'en-US': { other: 'Open TeamsBoard' },
+    'zh-CN': { other: '打开 TeamBuddy' },
+    'en-US': { other: 'Open TeamBuddy' },
   },
   'tray.menu.hide': {
     'zh-CN': { other: '隐藏主窗口' },
@@ -72,24 +72,24 @@ const MESSAGES = Object.freeze({
     'en-US': { other: 'Running tasks: {count}' },
   },
   'tray.menu.quit': {
-    'zh-CN': { other: '退出 TeamsBoard' },
-    'en-US': { other: 'Quit TeamsBoard' },
+    'zh-CN': { other: '退出 TeamBuddy' },
+    'en-US': { other: 'Quit TeamBuddy' },
   },
   'dialog.selectWorkDirectory.title': {
     'zh-CN': { other: '选择工作目录' },
     'en-US': { other: 'Select working directory' },
   },
   'dialog.quit.title': {
-    'zh-CN': { other: '退出 TeamsBoard' },
-    'en-US': { other: 'Quit TeamsBoard' },
+    'zh-CN': { other: '退出 TeamBuddy' },
+    'en-US': { other: 'Quit TeamBuddy' },
   },
   'dialog.quit.statusUnknown.message': {
     'zh-CN': { other: '无法确认是否有任务正在执行' },
     'en-US': { other: 'Cannot confirm whether tasks are still running' },
   },
   'dialog.quit.statusUnknown.detail': {
-    'zh-CN': { other: '退出 TeamsBoard 将停止本地后台服务。建议继续在后台运行。' },
-    'en-US': { other: 'Quitting TeamsBoard stops the local background service. Keeping it running is recommended.' },
+    'zh-CN': { other: '退出 TeamBuddy 将停止本地后台服务。建议继续在后台运行。' },
+    'en-US': { other: 'Quitting TeamBuddy stops the local background service. Keeping it running is recommended.' },
   },
   'dialog.quit.runningTasks.message': {
     'zh-CN': { other: '当前有 {count} 个任务正在执行' },
@@ -99,8 +99,8 @@ const MESSAGES = Object.freeze({
     },
   },
   'dialog.quit.runningTasks.detail': {
-    'zh-CN': { other: '退出 TeamsBoard 将中断这些任务。' },
-    'en-US': { other: 'Quitting TeamsBoard interrupts these tasks.' },
+    'zh-CN': { other: '退出 TeamBuddy 将中断这些任务。' },
+    'en-US': { other: 'Quitting TeamBuddy interrupts these tasks.' },
   },
   'dialog.quit.keepRunning': {
     'zh-CN': { other: '继续后台运行' },
@@ -111,12 +111,12 @@ const MESSAGES = Object.freeze({
     'en-US': { other: 'Quit anyway' },
   },
   'dialog.close.title': {
-    'zh-CN': { other: '关闭 TeamsBoard' },
-    'en-US': { other: 'Close TeamsBoard' },
+    'zh-CN': { other: '关闭 TeamBuddy' },
+    'en-US': { other: 'Close TeamBuddy' },
   },
   'dialog.close.message': {
-    'zh-CN': { other: '关闭窗口后，TeamsBoard 可以继续在后台运行' },
-    'en-US': { other: 'TeamsBoard can keep running in the background after the window closes' },
+    'zh-CN': { other: '关闭窗口后，TeamBuddy 可以继续在后台运行' },
+    'en-US': { other: 'TeamBuddy can keep running in the background after the window closes' },
   },
   'dialog.close.detail': {
     'zh-CN': { other: '正在执行的任务不会中断，你可以通过系统托盘重新打开或退出应用。' },
@@ -127,28 +127,28 @@ const MESSAGES = Object.freeze({
     'en-US': { other: 'Minimize to tray' },
   },
   'dialog.close.quit': {
-    'zh-CN': { other: '退出 TeamsBoard' },
-    'en-US': { other: 'Quit TeamsBoard' },
+    'zh-CN': { other: '退出 TeamBuddy' },
+    'en-US': { other: 'Quit TeamBuddy' },
   },
   'dialog.close.cancel': {
     'zh-CN': { other: '取消' },
     'en-US': { other: 'Cancel' },
   },
   'error.backendStopped.title': {
-    'zh-CN': { other: 'TeamsBoard 服务已停止' },
-    'en-US': { other: 'TeamsBoard service stopped' },
+    'zh-CN': { other: 'TeamBuddy 服务已停止' },
+    'en-US': { other: 'TeamBuddy service stopped' },
   },
   'error.backendStopped.detail': {
     'zh-CN': { other: '本地服务意外退出，客户端即将关闭。' },
     'en-US': { other: 'The local service exited unexpectedly. The client will now close.' },
   },
   'error.backendStartFailed.title': {
-    'zh-CN': { other: 'TeamsBoard 服务启动失败' },
-    'en-US': { other: 'TeamsBoard service failed to start' },
+    'zh-CN': { other: 'TeamBuddy 服务启动失败' },
+    'en-US': { other: 'TeamBuddy service failed to start' },
   },
   'error.appStartFailed.title': {
-    'zh-CN': { other: 'TeamsBoard 启动失败' },
-    'en-US': { other: 'TeamsBoard failed to start' },
+    'zh-CN': { other: 'TeamBuddy 启动失败' },
+    'en-US': { other: 'TeamBuddy failed to start' },
   },
   'error.codex.openFailed': {
     'zh-CN': { other: '无法打开 Codex，请复制提示词后手动打开' },
@@ -165,21 +165,21 @@ const MESSAGES = Object.freeze({
   'notification.failure.darwin': {
     'zh-CN': {
       other:
-        '系统通知未能显示。请使用签名后的 TeamsBoard.app，并在 macOS「系统设置 → 通知 → TeamsBoard」中允许通知；同时检查专注模式。',
+        '系统通知未能显示。请使用签名后的 TeamBuddy.app，并在 macOS「系统设置 → 通知 → TeamBuddy」中允许通知；同时检查专注模式。',
     },
     'en-US': {
       other:
-        'The system notification could not be shown. Use a signed TeamsBoard.app, allow notifications in macOS Settings → Notifications → TeamsBoard, and check Focus mode.',
+        'The system notification could not be shown. Use a signed TeamBuddy.app, allow notifications in macOS Settings → Notifications → TeamBuddy, and check Focus mode.',
     },
   },
   'notification.failure.win32': {
     'zh-CN': {
       other:
-        '系统通知未能显示。请通过安装程序安装 TeamsBoard，并在 Windows「设置 → 系统 → 通知」中允许 TeamsBoard 通知；同时检查勿扰模式。',
+        '系统通知未能显示。请通过安装程序安装 TeamBuddy，并在 Windows「设置 → 系统 → 通知」中允许 TeamBuddy 通知；同时检查勿扰模式。',
     },
     'en-US': {
       other:
-        'The system notification could not be shown. Install TeamsBoard with the installer, allow notifications in Windows Settings → System → Notifications, and check Do Not Disturb.',
+        'The system notification could not be shown. Install TeamBuddy with the installer, allow notifications in Windows Settings → System → Notifications, and check Do Not Disturb.',
     },
   },
   'notification.failure.generic': {

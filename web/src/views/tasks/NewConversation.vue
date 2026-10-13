@@ -98,7 +98,7 @@
             >
               <BranchesOutlined />
               <span class="btn-text">
-                {{ executionMode?.displayName || t('workflows.task.newConversation.chooseExecutionMode') || '选择执行方式' }}
+                {{ executionModeDisplayName || t('workflows.task.newConversation.chooseExecutionMode') || '选择执行方式' }}
               </span>
             </button>
 
@@ -193,6 +193,11 @@ import AssignExecutionModeModal, {
 import type { ExecutionModeSelection } from '@/components/ExecutionModePicker.vue'
 import OnboardingGuide from '@/views/tasks/components/OnboardingGuide.vue'
 import { resolveOnboardingTarget, useOnboardingGuide } from '@/composables/useOnboardingGuide'
+import {
+  NEW_CONVERSATION_DRAFT_KEY,
+  readComposerDraft,
+  writeComposerDraft,
+} from '@/composables/useComposerDraft'
 import { useConversationStore, getLastDirSegment } from '@/stores/conversation'
 import { useCreateTaskDefaults } from '@/composables/useCreateTaskDefaults'
 import { useTaskImageAttachments } from '@/composables/useTaskImageAttachments'
@@ -237,7 +242,8 @@ const {
   remove: removeAttachmentItem,
 } = useTaskImageAttachments()
 
-const question = ref('')
+const question = ref(readComposerDraft(NEW_CONVERSATION_DRAFT_KEY))
+watch(question, (value) => writeComposerDraft(NEW_CONVERSATION_DRAFT_KEY, value))
 const workDirectory = ref('')
 const executionMode = ref<ExecutionModeSelection | null>(null)
 const submitting = ref(false)
@@ -320,7 +326,12 @@ function restorePreferences() {
   try {
     const rawMode = localStorage.getItem(LAST_EXEC_MODE_KEY)
     if (rawMode) {
-      executionMode.value = JSON.parse(rawMode) as ExecutionModeSelection
+      const parsed = JSON.parse(rawMode) as ExecutionModeSelection
+      // 历史缓存包含保存时语言下的 displayName。只恢复语义字段，展示文案按当前
+      // locale 重新计算，避免切换语言或重启后继续显示旧语言。
+      executionMode.value = { ...parsed, displayName: '' }
+      if (parsed.mode === 'pipeline') void pipelineStore.loadPipelines().catch(() => {})
+      if (parsed.mode === 'expert_group') void expertGroupStore.load().catch(() => {})
     }
   } catch {
     // ignore
@@ -367,6 +378,28 @@ function selectionDisplayName(selection: AssignedExecutionMode): string {
     : `${t('workflows.task.common.directExecution')} · ${cliName}`
 }
 
+const executionModeDisplayName = computed(() => {
+  const mode = executionMode.value
+  if (!mode) return ''
+  return selectionDisplayName({
+    mode: mode.mode,
+    tool: mode.executionTool || '',
+    pipelineUuid: mode.pipelineUuid || '',
+    expertGroupUuid: mode.expertGroupUuid || '',
+    modelName: mode.modelName || '',
+  })
+})
+
+function serializeExecutionMode(mode: ExecutionModeSelection) {
+  return JSON.stringify({
+    mode: mode.mode,
+    pipelineUuid: mode.pipelineUuid,
+    expertGroupUuid: mode.expertGroupUuid,
+    executionTool: mode.executionTool,
+    modelName: mode.modelName,
+  })
+}
+
 async function onExecutionModeSelected(selection: AssignedExecutionMode) {
   if (selection.mode === 'cli') await ensureCliNamesLoaded()
   const mode: ExecutionModeSelection = {
@@ -379,7 +412,7 @@ async function onExecutionModeSelected(selection: AssignedExecutionMode) {
   }
   executionMode.value = mode
   try {
-    localStorage.setItem(LAST_EXEC_MODE_KEY, JSON.stringify(mode))
+    localStorage.setItem(LAST_EXEC_MODE_KEY, serializeExecutionMode(mode))
   } catch {
     // ignore
   }
@@ -470,7 +503,7 @@ async function handleSubmit() {
     conversationStore.recordWorkingDir(workDir)
     try {
       localStorage.setItem(LAST_WORK_DIR_KEY, workDir)
-      localStorage.setItem(LAST_EXEC_MODE_KEY, JSON.stringify(mode))
+      localStorage.setItem(LAST_EXEC_MODE_KEY, serializeExecutionMode(mode))
     } catch {
       // ignore
     }
@@ -520,19 +553,20 @@ async function handleSubmit() {
     message.success(t('workflows.task.feedback.taskCreated') || '任务创建成功')
 
     if (mode.mode === 'vibe_coding') {
+      const toolName = executionModeDisplayName.value
       try {
         const openResult = await openTaskInCodex(created.uuid)
         if (openResult.opened) {
-          message.success(t('workflows.task.detail.toolOpened', { tool: mode.displayName }))
+          message.success(t('workflows.task.detail.toolOpened', { tool: toolName }))
         } else if (openResult.copied) {
-          message.warning(t('workflows.task.detail.toolCopiedFallback', { tool: mode.displayName }))
+          message.warning(t('workflows.task.detail.toolCopiedFallback', { tool: toolName }))
         } else if (openResult.error) {
           message.error(openResult.error.message)
         } else {
-          message.warning(t('workflows.task.detail.toolUnavailable', { tool: mode.displayName }))
+          message.warning(t('workflows.task.detail.toolUnavailable', { tool: toolName }))
         }
       } catch (error) {
-        message.error(error instanceof Error ? error.message : t('workflows.task.detail.toolUnavailable', { tool: mode.displayName }))
+        message.error(error instanceof Error ? error.message : t('workflows.task.detail.toolUnavailable', { tool: toolName }))
       }
     }
 
@@ -540,6 +574,7 @@ async function handleSubmit() {
       pendingCliKickoffUuid.value = created.uuid
     }
 
+    question.value = ''
     await conversationStore.loadConversations(true)
     void router.push({ name: 'tasks', query: { taskUuid: created.uuid } })
   } catch (err) {
@@ -628,7 +663,7 @@ onUnmounted(() => {
 }
 
 .task-composer-card:focus-within {
-  border-color: #3157e2;
+  border-color: #e5e7eb;
 }
 
 .composer-textarea {
@@ -718,9 +753,9 @@ onUnmounted(() => {
   border-radius: 6px;
   background: #f9f9f9;
   color: #595959;
-  font-size: 13px;
   cursor: pointer;
   transition: all 0.15s;
+  font-size: 12px;
 }
 
 .action-btn:hover {

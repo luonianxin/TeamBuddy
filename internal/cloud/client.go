@@ -22,6 +22,7 @@ type Client struct {
 	httpClient  *http.Client
 	secretStore secrets.Store
 	cloudCfg    *config.CloudConfig
+	userID      string // immutable owner of an authenticated account client
 }
 
 // NewClient creates a cloud HTTP client

@@ -23,3 +23,5 @@ logs/
 .cursor/
 node_modules/
 
+.esbuild-tmp/
+

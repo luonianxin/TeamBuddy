@@ -4,23 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
 	"goteams-client/internal/applog"
 	"goteams-client/internal/cloud"
 )
 
-// SessionSyncService is a standalone asynchronous service that pushes cloud task
-// step conversations to the cloud. Whenever a gt_cli_sessions row of a cloud task
-// changes, its step becomes pending and is re-pushed with the step's FULL conversation
-// JSON plus the latest run result. Per task the pending steps are pushed strictly in
-// step creation order: if the earliest pending step fails to push, later steps of the
-// same task are held back so the cloud never sees an out-of-order step history.
-//
-// Success semantics: an HTTP 2xx response counts as sync success regardless of the
-// business result in the response body; any transport failure or non-2xx status is
-// recorded on the step's session rows as the failure reason (e.g. HTTP 502).
+// SessionSyncService captures and retries task projections and complete step
+// conversations, scoped to the active cloud account. It never uploads terminal
+// contents from external Vibe tools.
 type SessionSyncService struct {
 	db       *sql.DB
 	client   func() *cloud.Client
@@ -62,124 +54,34 @@ func (s *SessionSyncService) Start(ctx context.Context) {
 	}()
 }
 
-// syncRound pushes pending step sessions once across all cloud tasks.
+// syncRound also visits tasks without CLI sessions: Vibe reports and task status
+// changes need the same durable retry path as direct execution.
 func (s *SessionSyncService) syncRound(ctx context.Context) {
 	if s.db == nil || s.client == nil {
 		return
 	}
 	client := s.client()
-	if client == nil {
-		return // not logged in to any cloud account
-	}
-	taskUUIDs, err := s.pendingTaskUUIDs(ctx)
-	if err != nil {
-		applog.Warn("[CloudSync] 查询待同步会话任务失败", "error", err.Error())
+	if client == nil || client.UserID() == "" {
 		return
 	}
-	for _, taskUUID := range taskUUIDs {
+	keys, err := pendingTaskKeys(ctx, s.db, client)
+	if err != nil {
+		applog.Warn("[CloudSync] read pending tasks failed", "error", err)
+		return
+	}
+	for _, key := range keys {
 		if ctx.Err() != nil {
 			return
 		}
-		s.syncTask(ctx, client, taskUUID)
-	}
-}
-
-// pendingTaskUUIDs lists cloud tasks that have at least one session record that was
-// never synced successfully or changed after its last successful sync.
-func (s *SessionSyncService) pendingTaskUUIDs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.task_uuid
-		 FROM gt_cli_sessions s
-		 JOIN gt_tasks t ON t.uuid = s.task_uuid
-		 WHERE t.source_type = 'cloud'
-		   AND (s.cloud_sync_status <> ? OR s.updated_at > s.cloud_synced_at)
-		 GROUP BY s.task_uuid
-		 ORDER BY MIN(s.created_at) ASC, s.task_uuid ASC`, syncStatusSuccess)
-	if err != nil {
-		return nil, fmt.Errorf("查询待同步任务失败: %w", err)
-	}
-	defer rows.Close()
-	taskUUIDs := make([]string, 0)
-	for rows.Next() {
-		var taskUUID string
-		if err := rows.Scan(&taskUUID); err != nil {
-			return nil, fmt.Errorf("读取待同步任务失败: %w", err)
+		if err := defaultPusher.PushTaskSync(ctx, s.db, client, key); err != nil {
+			applog.Warn("[CloudSync] sync task failed", "task_uuid", key, "error", err)
 		}
-		taskUUIDs = append(taskUUIDs, taskUUID)
 	}
-	return taskUUIDs, rows.Err()
-}
-
-// syncTask pushes the task's pending steps in creation order. It stops at the first
-// failure so ordering is preserved; the failed step is retried next round.
-func (s *SessionSyncService) syncTask(ctx context.Context, client *cloud.Client, taskUUID string) {
-	// 云端要求任务投影（task sync）必须先于会话记录（session sync）到达：若投影缺失，
-	// 会话推送会被 404 拒绝并进入无限重试。这里在推送会话前先同步推送一次任务投影，
-	// 保证顺序正确；云端 upsert 幂等，重复推送无害。当任务尚未分配流水线快照时，
-	// BuildTaskSync 会静默跳过（见内部 WARN 日志），此时会话仍会 404——根因是任务未分配流水线。
-	if err := defaultPusher.PushTaskSync(ctx, s.db, client, taskUUID); err != nil {
-		applog.Warn("[CloudSync] 推送会话前同步任务投影失败", "task_uuid", taskUUID, "error", err.Error())
-	}
-	for pushed := 0; pushed < maxStepPushesPerTaskPerRound; pushed++ {
-		if ctx.Err() != nil {
-			return
-		}
-		payload, stepUUID, watermark, err := s.nextPendingStep(ctx, taskUUID)
-		if err != nil {
-			applog.Warn("[CloudSync] 读取待同步步骤会话失败", "task_uuid", taskUUID, "error", err.Error())
-			return
-		}
-		if payload == nil {
-			return // task fully synced
-		}
-
-		pushCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err = client.PushPipelineTaskSession(pushCtx, *payload)
-		cancel()
-		if err != nil {
-			// Record the failure reason (HTTP status code such as 502, or transport error)
-			// on the step's session rows and keep the step pending so the next round retries
-			// it in the same order.
-			s.markStepFailed(ctx, taskUUID, stepUUID, err.Error())
-			applog.Warn("[CloudSync] 同步步骤会话失败", "task_uuid", taskUUID, "step_key", payload.StepKey, "error", err.Error())
-			return
-		}
-		s.markStepSuccess(ctx, taskUUID, stepUUID, watermark)
-	}
-}
-
-// nextPendingStep loads the task's earliest pending step and builds its step-level
-// session payload. The returned watermark is the step's max session updated_at at
-// read time: it becomes the sync cursor on success, so changes written during the
-// push remain pending.
-func (s *SessionSyncService) nextPendingStep(ctx context.Context, taskUUID string) (*cloud.PipelineTaskSessionSync, string, int64, error) {
-	var stepUUID string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT s.step_uuid
-		 FROM gt_cli_sessions s
-		 WHERE s.task_uuid = ?
-		   AND (s.cloud_sync_status <> ? OR s.updated_at > s.cloud_synced_at)
-		   AND s.step_uuid <> ''
-		 GROUP BY s.step_uuid
-		 ORDER BY MIN(s.created_at) ASC, MIN(s.rowid) ASC
-		 LIMIT 1`, taskUUID, syncStatusSuccess).Scan(&stepUUID)
-	if err == sql.ErrNoRows {
-		return nil, "", 0, nil
-	}
-	if err != nil {
-		return nil, "", 0, fmt.Errorf("查询最早待同步步骤失败: %w", err)
-	}
-
-	payload, watermark, err := buildStepSessionPayload(ctx, s.db, taskUUID, stepUUID)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	return payload, stepUUID, watermark, nil
 }
 
 // buildStepSessionPayload aggregates one step's latest run metadata with its full
 // conversation body into the step-level session sync payload.
-func buildStepSessionPayload(ctx context.Context, db *sql.DB, taskUUID, stepUUID string) (*cloud.PipelineTaskSessionSync, int64, error) {
+func buildStepSessionPayload(ctx context.Context, db syncQueryer, taskUUID, stepUUID string) (*cloud.PipelineTaskSessionSync, int64, error) {
 	var stepKey, stepName string
 	var executionIndex int
 	err := db.QueryRowContext(ctx,
@@ -259,114 +161,58 @@ func buildStepSessionPayload(ctx context.Context, db *sql.DB, taskUUID, stepUUID
 		CreatedAt:          minCreatedAt,
 		ClientUpdatedAt:    maxUpdatedAt,
 	}
+	fitSessionSyncPayload(payload)
 	return payload, maxUpdatedAt, nil
 }
 
-// markStepSuccess records a successful push for every session row of the step whose
-// updated_at is not newer than the watermark; later changes become pending again.
-func (s *SessionSyncService) markStepSuccess(ctx context.Context, taskUUID, stepUUID string, watermark int64) {
-	if _, err := s.db.ExecContext(ctx, `
-		UPDATE gt_cli_sessions
-		 SET cloud_sync_status = ?, cloud_sync_error = '', cloud_synced_at = updated_at
-		 WHERE task_uuid = ? AND step_uuid = ? AND updated_at <= ?`,
-		syncStatusSuccess, taskUUID, stepUUID, watermark); err != nil {
-		applog.Warn("[CloudSync] 更新步骤会话同步成功状态失败", "task_uuid", taskUUID, "step_uuid", stepUUID, "error", err.Error())
+// 这些上限与云端校验、pipeline_task_sessions 列长一致。超限会让整次会话推送返回 400，
+// 执行过程和执行结果都到不了 Agent 页。按字节截断，并保持 UTF-8 完整。
+const (
+	cloudPromptSnapshotMaxBytes   = 128 * 1024
+	cloudFinalResultMaxBytes      = 64 * 1024
+	cloudErrorMessageMaxBytes     = 64 * 1024
+	cloudMessageMaxBytes          = 256 * 1024
+	cloudSessionStepNameMaxBytes  = 128
+	cloudSessionStepKeyMaxBytes   = 64
+	cloudSessionCLITypeMaxBytes   = 32
+	cloudSessionModelMaxBytes     = 64
+	cloudSessionStatusMaxBytes    = 32
+	cloudSessionErrorCodeMaxBytes = 64
+)
+
+func fitSessionSyncPayload(payload *cloud.PipelineTaskSessionSync) {
+	if payload == nil {
+		return
+	}
+	payload.StepKey = truncateUTF8Bytes(payload.StepKey, cloudSessionStepKeyMaxBytes)
+	payload.StepName = truncateUTF8Bytes(payload.StepName, cloudSessionStepNameMaxBytes)
+	payload.Status = truncateUTF8Bytes(payload.Status, cloudSessionStatusMaxBytes)
+	payload.CliType = truncateUTF8Bytes(payload.CliType, cloudSessionCLITypeMaxBytes)
+	payload.ModelName = truncateUTF8Bytes(payload.ModelName, cloudSessionModelMaxBytes)
+	payload.ResultStatus = truncateUTF8Bytes(payload.ResultStatus, cloudSessionStatusMaxBytes)
+	payload.ErrorCode = truncateUTF8Bytes(payload.ErrorCode, cloudSessionErrorCodeMaxBytes)
+	payload.PromptSnapshot = truncateUTF8Bytes(payload.PromptSnapshot, cloudPromptSnapshotMaxBytes)
+	payload.FinalResult = truncateUTF8Bytes(payload.FinalResult, cloudFinalResultMaxBytes)
+	payload.ErrorMessage = truncateUTF8Bytes(payload.ErrorMessage, cloudErrorMessageMaxBytes)
+	for i := range payload.Conversation.Rounds {
+		round := &payload.Conversation.Rounds[i]
+		round.UserMessage = truncateUTF8Bytes(round.UserMessage, cloudMessageMaxBytes)
+		for j := range round.AssistantMessages {
+			round.AssistantMessages[j].Content = truncateUTF8Bytes(round.AssistantMessages[j].Content, cloudMessageMaxBytes)
+		}
 	}
 }
 
-// FlushTaskExecution pushes the current execution's task projection and every step
-// conversation before the caller discards the local run. Switching execution mode
-// deletes local sessions, so this is the last chance to keep that run's tokens and
-// dialogue on the cloud under the current execution_index.
+// FlushTaskExecution captures before attempting network delivery. Offline or
+// failed uploads remain in SQLite and are retried by the periodic service.
 func FlushTaskExecution(ctx context.Context, db *sql.DB, client *cloud.Client, taskUUID string) error {
-	if db == nil || client == nil || strings.TrimSpace(taskUUID) == "" {
-		return nil
-	}
-	var sourceType string
-	err := db.QueryRowContext(ctx, `SELECT source_type FROM gt_tasks WHERE uuid=?`, taskUUID).Scan(&sourceType)
-	if err == sql.ErrNoRows || sourceType != "cloud" {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("读取任务来源失败: %w", err)
-	}
-	if err = DefaultPusher().PushTaskSync(ctx, db, client, taskUUID); err != nil {
+	if err := CaptureTaskExecution(ctx, db, taskUUID); err != nil {
 		return err
 	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT st.uuid
-		 FROM gt_task_steps st
-		 WHERE st.task_uuid = ?
-		   AND EXISTS (
-		     SELECT 1 FROM gt_cli_sessions s
-		     WHERE s.task_uuid = st.task_uuid AND s.step_uuid = st.uuid
-		   )
-		 ORDER BY st.step_order, st.rowid`, taskUUID)
-	if err != nil {
-		return fmt.Errorf("查询待封存步骤失败: %w", err)
+	if client == nil {
+		return nil
 	}
-	stepUUIDs := make([]string, 0)
-	for rows.Next() {
-		var stepUUID string
-		if err = rows.Scan(&stepUUID); err != nil {
-			rows.Close()
-			return fmt.Errorf("读取待封存步骤失败: %w", err)
-		}
-		stepUUIDs = append(stepUUIDs, stepUUID)
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("遍历待封存步骤失败: %w", err)
-	}
-	if err = rows.Close(); err != nil {
-		return fmt.Errorf("关闭待封存步骤查询失败: %w", err)
-	}
-	var firstErr error
-	for _, stepUUID := range stepUUIDs {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		payload, watermark, buildErr := buildStepSessionPayload(ctx, db, taskUUID, stepUUID)
-		if buildErr != nil {
-			if firstErr == nil {
-				firstErr = buildErr
-			}
-			continue
-		}
-		if payload == nil {
-			continue
-		}
-		pushCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		pushErr := client.PushPipelineTaskSession(pushCtx, *payload)
-		cancel()
-		if pushErr != nil {
-			if firstErr == nil {
-				firstErr = pushErr
-			}
-			continue
-		}
-		if _, err = db.ExecContext(ctx, `
-			UPDATE gt_cli_sessions
-			 SET cloud_sync_status = ?, cloud_sync_error = '', cloud_synced_at = updated_at
-			 WHERE task_uuid = ? AND step_uuid = ? AND updated_at <= ?`,
-			syncStatusSuccess, taskUUID, stepUUID, watermark); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("更新步骤封存状态失败: %w", err)
-		}
-	}
-	return firstErr
-}
-
-// markStepFailed records the failure reason on the step's pending session rows.
-func (s *SessionSyncService) markStepFailed(ctx context.Context, taskUUID, stepUUID, reason string) {
-	truncated := truncateRunes(reason, syncErrorMaxRunes)
-	if _, err := s.db.ExecContext(ctx, `
-		UPDATE gt_cli_sessions
-		 SET cloud_sync_status = ?, cloud_sync_error = ?
-		 WHERE task_uuid = ? AND step_uuid = ?
-		   AND (cloud_sync_status <> ? OR updated_at > cloud_synced_at)`,
-		syncStatusFailed, truncated, taskUUID, stepUUID, syncStatusSuccess); err != nil {
-		applog.Warn("[CloudSync] 更新步骤会话同步失败状态失败", "task_uuid", taskUUID, "step_uuid", stepUUID, "error", err.Error())
-	}
+	return defaultPusher.PushTaskSync(ctx, db, client, taskUUID)
 }
 
 // truncateRunes shortens a string to at most max runes.

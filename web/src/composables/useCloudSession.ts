@@ -7,6 +7,7 @@ import { useAppStore } from '@/stores/app'
 export interface SessionResponse {
   local_authenticated: boolean
   cloud_logged_in: boolean
+  account_scope?: string
   user?: {
     id: string
     username: string
@@ -55,8 +56,9 @@ export function applySession(session: SessionResponse, pinia?: Pinia): void {
   if (session.cloud_logged_in && session.user) {
     authStore.setCloudAuth('http-only-session', {
       id: session.user.id,
+      accountScope: session.account_scope,
       username: session.user.username,
-      displayName: session.user.display_name || session.user.username,
+      displayName: session.user.display_name?.trim() || undefined,
       avatar: session.user.avatar,
       role: session.user.role,
     })

@@ -4,6 +4,7 @@ import apiClient from '@/api/client'
 import type { TaskNotification } from '@/types/pipeline'
 import type { LocalProject } from '@/types/project'
 import { t } from '@/i18n'
+import { removeDeletedTaskFromCache } from '@/utils/taskConversationCache'
 
 export interface TaskConversation {
   task_uuid: string
@@ -12,6 +13,7 @@ export interface TaskConversation {
   project_uuid: string
   items: TaskNotification[]
   latest: TaskNotification
+  running: boolean
   unread: boolean
   is_archived: boolean
 }
@@ -22,8 +24,22 @@ export interface ConversationGroup {
   displayName: string
   fullPath: string
   projectName?: string
+  pinnedAt: number
   items: TaskConversation[]
 }
+
+interface SidebarWorkspace {
+  directory_key: string
+  work_dir: string
+  display_name: string
+  pinned_at: number
+}
+
+export interface WorkspaceDeletionPreview {
+  items: { uuid: string; title: string; is_archived: boolean }[]
+}
+
+type TaskStatus = NonNullable<TaskNotification['task_status']>
 
 const ARCHIVED_COLLAPSED_KEY = 'goteams.conversation.archivedCollapsed'
 const WORK_DIR_HISTORY_KEY = 'goteams.workDirectories.history'
@@ -36,7 +52,11 @@ function normalizePath(p: string): string {
   } else if (/^\\\\\?\\/i.test(value)) {
     value = value.slice(4)
   }
-  return value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  if (!value) return ''
+  value = value.replace(/\\/g, '/')
+  const windowsPath = /^[a-z]:\//i.test(value) || value.startsWith('//')
+  if (value !== '/' && !/^[a-z]:\/$/i.test(value)) value = value.replace(/\/+$/, '')
+  return windowsPath ? value.toLowerCase() : value
 }
 
 export function getLastDirSegment(p: string): string {
@@ -49,6 +69,7 @@ export function getLastDirSegment(p: string): string {
 export const useConversationStore = defineStore('conversation', () => {
   const rawNotifications = ref<TaskNotification[]>([])
   const projects = ref<LocalProject[]>([])
+  const workspacePreferences = ref<SidebarWorkspace[]>([])
   const loading = ref(false)
   const loaded = ref(false)
   const error = ref('')
@@ -58,7 +79,25 @@ export const useConversationStore = defineStore('conversation', () => {
   )
   const collapsedGroupKeys = ref<Set<string>>(new Set())
   const dirHistory = ref<string[]>([])
+  const taskStatuses = ref<Record<string, TaskStatus>>({})
   let loadVersion = 0
+  let workspaceLoadVersion = 0
+
+  function normalizeTaskStatus(status?: string): TaskStatus | undefined {
+    if (status === 'pending' || status === 'active' || status === 'done' || status === 'blocked') {
+      return status
+    }
+    return undefined
+  }
+
+  function setTaskStatus(taskUuid: string, status?: string) {
+    const normalized = normalizeTaskStatus(status)
+    if (!taskUuid || !normalized) return
+    taskStatuses.value[taskUuid] = normalized
+    for (const item of rawNotifications.value) {
+      if (item.task_uuid === taskUuid) item.task_status = normalized
+    }
+  }
 
   function loadDirHistory() {
     try {
@@ -111,16 +150,11 @@ export const useConversationStore = defineStore('conversation', () => {
     }
     const norm = normalizePath(trimmed)
     const matchedProject = projects.value.find((p) => p.local_dir && normalizePath(p.local_dir) === norm)
-    if (matchedProject) {
-      return {
-        displayName: matchedProject.name,
-        fullPath: trimmed,
-        projectName: matchedProject.name,
-      }
-    }
+    const preference = workspacePreferences.value.find((item) => item.directory_key === norm)
     return {
-      displayName: getLastDirSegment(trimmed),
+      displayName: preference?.display_name || matchedProject?.name || getLastDirSegment(trimmed),
       fullPath: trimmed,
+      projectName: matchedProject?.name,
     }
   }
 
@@ -136,6 +170,7 @@ export const useConversationStore = defineStore('conversation', () => {
       .map(([taskUuid, items]) => {
         items.sort((a, b) => b.created_at - a.created_at)
         const latest = items[0]
+        const taskStatus = latest.task_status || taskStatuses.value[taskUuid]
         const workDir = items.find((i) => i.work_dir)?.work_dir || ''
         const projectUuid = items.find((i) => i.project_uuid)?.project_uuid || ''
         const isArchived = items.some((i) => i.is_archived)
@@ -150,6 +185,9 @@ export const useConversationStore = defineStore('conversation', () => {
           project_uuid: projectUuid,
           items,
           latest,
+          running:
+            taskStatus === 'active' &&
+            ['created', 'running'].includes(latest.status || latest.terminal_status || ''),
           unread: items.some((i) => !i.is_read),
           is_archived: isArchived,
         }
@@ -162,7 +200,9 @@ export const useConversationStore = defineStore('conversation', () => {
     if (!q) return true
     return (
       conv.title.toLowerCase().includes(q) ||
-      conv.work_dir.toLowerCase().includes(q)
+      conv.work_dir.toLowerCase().includes(q) ||
+      resolveWorkDirInfo(conv.work_dir).displayName.toLowerCase().includes(q) ||
+      (resolveWorkDirInfo(conv.work_dir).projectName || '').toLowerCase().includes(q)
     )
   }
 
@@ -178,7 +218,7 @@ export const useConversationStore = defineStore('conversation', () => {
     () => allConversations.value.filter((c) => !c.is_archived && c.unread).length,
   )
 
-  function groupList(convs: TaskConversation[]): ConversationGroup[] {
+  function groupList(convs: TaskConversation[], includeEmptyPinned = false): ConversationGroup[] {
     const groupsMap = new Map<string, TaskConversation[]>()
     for (const conv of convs) {
       // 斜杠、盘符大小写、尾部分隔符和 \\?\ 前缀不同，仍是同一目录。
@@ -188,12 +228,23 @@ export const useConversationStore = defineStore('conversation', () => {
       groupsMap.set(dirKey, list)
     }
 
+    if (includeEmptyPinned) {
+      const query = searchQuery.value.trim().toLowerCase()
+      for (const preference of workspacePreferences.value) {
+        const info = resolveWorkDirInfo(preference.work_dir)
+        if (preference.pinned_at && !groupsMap.has(preference.directory_key) &&
+          (!query || [info.displayName, info.projectName || '', preference.work_dir].some((value) => value.toLowerCase().includes(query)))) {
+          groupsMap.set(preference.directory_key, [])
+        }
+      }
+    }
     const groups: ConversationGroup[] = []
     for (const [dirKey, items] of groupsMap.entries()) {
       const project = dirKey
         ? projects.value.find((item) => item.local_dir && normalizePath(item.local_dir) === dirKey)
         : undefined
-      const rawDir = project?.local_dir
+      const preference = workspacePreferences.value.find((item) => item.directory_key === dirKey)
+      const rawDir = preference?.work_dir || project?.local_dir
         || items.map((item) => item.work_dir.trim()).find(Boolean)
         || ''
       const info = resolveWorkDirInfo(rawDir)
@@ -203,15 +254,59 @@ export const useConversationStore = defineStore('conversation', () => {
         displayName: info.displayName,
         fullPath: info.fullPath,
         projectName: info.projectName,
+        pinnedAt: preference?.pinned_at || 0,
         items,
       })
     }
 
-    return groups
+    return groups.sort((a, b) => b.pinnedAt - a.pinnedAt)
   }
 
-  const activeGroups = computed(() => groupList(activeConversations.value))
+  const activeGroups = computed(() => groupList(activeConversations.value, true))
   const archivedGroups = computed(() => groupList(archivedConversations.value))
+
+  async function loadWorkspacePreferences() {
+    const version = ++workspaceLoadVersion
+    const res = await apiClient.get<{ items: SidebarWorkspace[] }>('/tasks/workspaces')
+    if (version === workspaceLoadVersion) workspacePreferences.value = res.items || []
+  }
+
+  async function updateWorkspace(workDir: string, changes: { display_name?: string; pinned?: boolean }) {
+    const item = await apiClient.put<SidebarWorkspace>('/tasks/workspaces', { work_dir: workDir, ...changes })
+    workspaceLoadVersion += 1
+    const index = workspacePreferences.value.findIndex((entry) => entry.directory_key === item.directory_key)
+    if (index < 0) workspacePreferences.value.push(item)
+    else workspacePreferences.value[index] = item
+  }
+
+  async function previewWorkspaceDeletion(workDir: string) {
+    return apiClient.post<WorkspaceDeletionPreview>('/tasks/workspaces/delete-preview', { work_dir: workDir })
+  }
+
+  async function deleteWorkspaceTasks(workDir: string, taskUuids: string[]) {
+    const request = taskUuids.length ? apiClient.post : apiClient.delete
+    const result = await request<{ deleted_task_uuids: string[]; cleanup_failed_task_uuids: string[]; warning?: string }>(
+      taskUuids.length ? '/tasks/workspaces/delete' : '/tasks/workspaces',
+      { work_dir: workDir, task_uuids: taskUuids },
+    )
+    loadVersion += 1
+    loading.value = false
+    workspaceLoadVersion += 1
+    const deleted = new Set(result.deleted_task_uuids)
+    rawNotifications.value = rawNotifications.value.filter((item) => !deleted.has(item.task_uuid))
+    workspacePreferences.value = workspacePreferences.value.filter((item) => item.directory_key !== normalizePath(workDir))
+    collapsedGroupKeys.value.delete(normalizePath(workDir))
+    dirHistory.value = dirHistory.value.filter((dir) => normalizePath(dir) !== normalizePath(workDir))
+    try {
+      localStorage.setItem(WORK_DIR_HISTORY_KEY, JSON.stringify(dirHistory.value))
+    } catch {
+      // 存储失败不改变已完成的删除结果。
+    }
+    await Promise.allSettled(result.deleted_task_uuids.map(removeDeletedTaskFromCache))
+    // 再加载可见数据，保留预览后新建的任务；刷新失败不误报删除失败。
+    void loadConversations(true)
+    return result
+  }
 
   async function loadProjects() {
     try {
@@ -228,15 +323,29 @@ export const useConversationStore = defineStore('conversation', () => {
     loading.value = true
     error.value = ''
     try {
-      const [notifRes] = await Promise.all([
+      const [notificationResult, , workspaceResult] = await Promise.allSettled([
         apiClient.get<{ items: TaskNotification[] }>('/notifications', {
           include_archived: 1,
         }),
         loadProjects(),
+        loadWorkspacePreferences(),
       ])
       if (requestVersion !== loadVersion) return
-      rawNotifications.value = notifRes.items || []
+      if (notificationResult.status === 'rejected') throw notificationResult.reason
+      const nextNotifications = notificationResult.value.items || []
+      for (const item of nextNotifications) {
+        const responseStatus = normalizeTaskStatus(item.task_status)
+        if (responseStatus) {
+          taskStatuses.value[item.task_uuid] = responseStatus
+        } else if (taskStatuses.value[item.task_uuid]) {
+          item.task_status = taskStatuses.value[item.task_uuid]
+        }
+      }
+      rawNotifications.value = nextNotifications
       loaded.value = true
+      if (workspaceResult.status === 'rejected') {
+        error.value = workspaceResult.reason instanceof Error ? workspaceResult.reason.message : t('layout.sidebar.workspaceActionFailed')
+      }
     } catch (err) {
       if (requestVersion === loadVersion) {
         error.value = err instanceof Error ? err.message : '加载失败'
@@ -274,6 +383,29 @@ export const useConversationStore = defineStore('conversation', () => {
     } else {
       collapsedGroupKeys.value.add(key)
     }
+  }
+
+  async function renameTask(taskUuid: string, title: string) {
+    const result = await apiClient.put<{ uuid: string; title: string }>(
+      `/tasks/${encodeURIComponent(taskUuid)}/title`, { title },
+    )
+    // Discard list responses started before this mutation.
+    loadVersion += 1
+    loading.value = false
+    for (const item of rawNotifications.value) {
+      if (item.task_uuid === taskUuid) item.task_title = result.title
+    }
+  }
+
+  async function deleteTask(taskUuid: string) {
+    await apiClient.delete<{ uuid: string; deleted: boolean; warning?: string }>(
+      `/tasks/${encodeURIComponent(taskUuid)}`,
+    )
+    loadVersion += 1
+    loading.value = false
+    rawNotifications.value = rawNotifications.value.filter((item) => item.task_uuid !== taskUuid)
+    // Cache failures must not turn a completed server deletion into an error.
+    await removeDeletedTaskFromCache(taskUuid).catch(() => {})
   }
 
   function isGroupCollapsed(key: string): boolean {
@@ -323,11 +455,17 @@ export const useConversationStore = defineStore('conversation', () => {
     loadProjects,
     setTaskRead,
     archiveTask,
+    renameTask,
+    updateWorkspace,
+    previewWorkspaceDeletion,
+    deleteWorkspaceTasks,
+    deleteTask,
     toggleGroupCollapse,
     isGroupCollapsed,
     toggleArchivedCollapse,
     setSearchQuery,
     recordWorkingDir,
     upsertNotification,
+    setTaskStatus,
   }
 })

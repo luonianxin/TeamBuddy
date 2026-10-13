@@ -25,7 +25,9 @@ func buildInvocation(opts executor.RunOptions, resumeSession string) executor.In
 	if resumeSession != "" {
 		// 必须用 --resume：--session-id 表示“用该 ID 新建会话”，
 		// 对已存在的 ID 会以退出码 42 失败。
-		args = append(args, "--resume", resumeSession)
+		args = append(args, executor.SessionArg(false, "--resume", resumeSession)...)
+	} else if opts.PresetSessionID != "" {
+		args = append(args, executor.SessionArg(false, "--session-id", opts.PresetSessionID)...)
 	}
 	args = append(args, fullPermissionArg, "--output-format", "stream-json")
 	if opts.ModelProfile != "" {

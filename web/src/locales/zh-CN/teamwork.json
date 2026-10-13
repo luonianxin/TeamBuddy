@@ -40,6 +40,7 @@
   "workItem": {
     "title": "原始需求",
     "view": "查看原始需求",
+    "openInBrowser": "在浏览器中打开原始需求",
     "close": "关闭",
     "attributes": "属性",
     "taskInfo": "任务信息",

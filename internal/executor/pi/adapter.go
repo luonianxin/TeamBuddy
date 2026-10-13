@@ -30,7 +30,9 @@ func NewAdapter() executor.Adapter {
 func buildInvocation(opts executor.RunOptions, resumeSession string) executor.Invocation {
 	args := make([]string, 0, 8)
 	if resumeSession != "" {
-		args = append(args, "--session", resumeSession)
+		args = append(args, executor.SessionArg(false, "--session", resumeSession)...)
+	} else if opts.PresetSessionID != "" {
+		args = append(args, executor.SessionArg(false, "--session-id", opts.PresetSessionID)...)
 	}
 	args = append(args, "--mode", "json")
 	args = append(args, modelArgs(opts.ModelProfile)...)
@@ -67,6 +69,13 @@ type piEvent struct {
 	Message        *piMessage        `json:"message"`
 	AssistantEvent *piAssistantEvent `json:"assistantMessageEvent"`
 	Usage          piUsage           `json:"usage"`
+	Success        *bool             `json:"success"`
+	Attempt        int               `json:"attempt"`
+	MaxAttempts    int               `json:"maxAttempts"`
+	DelayMs        int64             `json:"delayMs"`
+	FinalError     string            `json:"finalError"`
+	ErrorMessage   string            `json:"errorMessage"`
+	WillRetry      bool              `json:"willRetry"`
 }
 
 type piMessage struct {
@@ -137,21 +146,65 @@ func (d *Decoder) Decode(raw string, emit executor.EmitFunc) {
 	case "session":
 		d.SetSession(event.ID)
 
-	case "agent_start", "agent_settled", "turn_start", "turn_end",
-		"queue_update", "compaction_start", "compaction_end",
-		"auto_retry_start", "auto_retry_end":
-		// 生命周期事件，无需展示
+	case "agent_start", "turn_start", "turn_end", "queue_update":
+		d.Heartbeat(emit)
+
+	case "agent_settled":
+		d.MarkTerminal()
+
+	case "compaction_start":
+		emit(executor.ExecutorEvent{Type: executor.EventActivity, Content: executor.ActivityCompacting, Activity: &executor.ActivityInfo{Kind: executor.ActivityCompacting}})
+
+	case "compaction_end":
+		emit(executor.ExecutorEvent{Type: executor.EventActivity, Content: executor.ActivityResumed, Activity: &executor.ActivityInfo{Kind: executor.ActivityResumed}})
+
+	case "auto_retry_start":
+		emit(executor.ExecutorEvent{
+			Type:    executor.EventActivity,
+			Content: executor.ActivityRetrying,
+			Activity: &executor.ActivityInfo{
+				Kind:    executor.ActivityRetrying,
+				Attempt: event.Attempt,
+				Max:     event.MaxAttempts,
+				DelayMs: event.DelayMs,
+				Detail:  event.ErrorMessage,
+			},
+		})
+
+	case "auto_retry_end":
+		if event.Success != nil && *event.Success {
+			emit(executor.ExecutorEvent{Type: executor.EventActivity, Content: executor.ActivityResumed, Activity: &executor.ActivityInfo{Kind: executor.ActivityResumed}})
+			break
+		}
+		if event.Success != nil && !*event.Success {
+			reason := strings.TrimSpace(event.FinalError)
+			if reason == "" {
+				reason = "Pi 自动重试失败"
+			}
+			d.MarkTerminal()
+			d.Fail(reason)
+			d.SetExitHint(executor.ExitFatalUpstream)
+		}
 
 	case "agent_end":
-		// 该事件不带 usage（只有 type/messages/willRetry），
-		// token 已按消息累计，由 Done 统一上报
+		// willRetry 为真时这一轮还没结束，不能当成终态。
+		if event.WillRetry {
+			d.Heartbeat(emit)
+			break
+		}
 		d.MarkTerminal()
 
 	case "message_start":
-		// 新一轮消息开始，清空上一轮的流式缓冲与本条消息的用量累计
+		// 新一轮消息开始，清空上一轮的流式缓冲与本条消息的用量累计。
+		// 这一刻模型请求已经发出。后续没有 token 不代表连接断开。
 		d.messageBuffer = ""
 		d.thinkingBuffer = ""
 		d.messageUsage = piUsage{}
+		emit(executor.ExecutorEvent{
+			Type:     executor.EventActivity,
+			Content:  executor.ActivityCallingModel,
+			Activity: &executor.ActivityInfo{Kind: executor.ActivityCallingModel},
+		})
 
 	case "message_update":
 		d.trackUsage(event.Usage)
@@ -165,7 +218,12 @@ func (d *Decoder) Decode(raw string, emit executor.EmitFunc) {
 		d.decodeMessageEnd(event, emit)
 
 	case "tool_execution_start":
-		d.ToolCall(event.ToolCallID, event.ToolName, executor.FormatToolArgs(event.Args), emit)
+		kind := ""
+		switch strings.ToLower(strings.TrimSpace(event.ToolName)) {
+		case "bash", "shell":
+			kind = executor.ToolKindShell
+		}
+		d.ToolCallKind(event.ToolCallID, event.ToolName, executor.FormatToolArgs(event.Args), kind, emit)
 
 	case "tool_execution_update":
 		d.ToolProgress(event.ToolCallID, event.Content, emit)

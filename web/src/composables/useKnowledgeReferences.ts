@@ -91,7 +91,7 @@ export function spillKnowledgeReference(
  * 选择器的「位置」列与引用块的来源路径共用同一份派生逻辑。
  *
  * 节点 name 为空字符串（如数据中夹带的占位节点）会被跳过，避免链路中
- * 留下 ` / ` 痕迹、从根一路放大成 `知识库 / TeamsBoard /  / 文件名`。
+ * 留下 ` / ` 痕迹、从根一路放大成 `知识库 / TeamBuddy /  / 文件名`。
  */
 export function buildKnowledgeFolderPaths(
   nodes: KnowledgeFolderNode[],
@@ -119,7 +119,7 @@ function describeRange(fragment: KnowledgeReferenceFragment | null) {
 /**
  * S-IN-12：folderPath 中可能夹杂空段（根目录 folder_id=0 时折叠成「知识库 / 」，
  * 或 buildKnowledgeFolderPaths 链路中存在空名称），拼装前过滤空段，
- * 避免 Agent 看到「知识库 / TeamsBoard /  / 文件名」这种带空目录痕迹的来源路径。
+ * 避免 Agent 看到「知识库 / TeamBuddy /  / 文件名」这种带空目录痕迹的来源路径。
  */
 function compactFolderPath(path: string): string {
   return path

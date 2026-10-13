@@ -153,3 +153,6 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// LooseTerminal 表示本解码器的 TerminalSeen 只代表「有过输出」，不能据此提前结束本轮。
+func (d *Decoder) LooseTerminal() bool { return true }

@@ -128,6 +128,9 @@ export interface ExecutionEvent {
   permission_requests?: { tool_name?: string; tool_input?: string }[]
   timestamp?: number
   error?: string
+  tool_result_interrupted?: boolean
+  interrupted_attempt?: number
+  activity?: { kind?: string; attempt?: number; max?: number; detail?: string; escalated?: boolean }
 }
 
 /** GET /tasks/sessions/:uuid/events 返回的执行过程事件条目 */
@@ -179,6 +182,7 @@ export interface TaskNotification {
   uuid: string
   task_uuid: string
   task_title?: string
+  task_status?: 'pending' | 'active' | 'done' | 'blocked'
   title?: string
   task_step_uuid: string
   step_name?: string
