@@ -2,6 +2,8 @@ package codex
 
 import (
 	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"goteams-client/internal/executor"
@@ -123,7 +125,7 @@ func (d *Decoder) Decode(raw string, emit executor.EmitFunc) {
 		d.SetSession(event.ThreadID)
 
 	case "turn.started":
-		// 轮次开始，无需展示
+		d.Heartbeat(emit)
 
 	case "message", "assistant", "response":
 		d.Message(executor.RawText(event.Content), emit)
@@ -137,7 +139,7 @@ func (d *Decoder) Decode(raw string, emit executor.EmitFunc) {
 	case "item.started", "item.updated":
 		// 工具开始执行：reasoning / todo 类 item 在这一阶段没有可展示内容
 		if label := event.Item.toolLabel(); label != "" {
-			d.ToolCall(event.Item.ID, label, "", emit)
+			d.ToolCallKind(event.Item.ID, label, "", event.Item.toolKind(), emit)
 			d.markToolCall(event.Item)
 		}
 
@@ -157,15 +159,32 @@ func (d *Decoder) Decode(raw string, emit executor.EmitFunc) {
 
 	case "turn.failed":
 		d.MarkTerminal()
-		d.Fail(d.errorText(event, "Codex 执行失败"))
+		message := d.errorText(event, "Codex 执行失败")
+		d.Fail(message)
+		if executor.LooksFatalUpstream(message) {
+			d.SetExitHint(executor.ExitFatalUpstream)
+		} else {
+			d.SetExitHint(executor.ExitFatalCLI)
+		}
 
 	case "error":
-		// Codex 会把断流重连提示当作 error 事件发出，这类通知不影响本次执行
 		message := d.errorText(event, "")
-		if isNonFatalNotice(message) {
+		if kind, attempt, max, ok := classifyCodexNotice(message); ok {
+			emit(executor.ExecutorEvent{
+				Type:    executor.EventActivity,
+				Content: kind,
+				Activity: &executor.ActivityInfo{
+					Kind:    kind,
+					Attempt: attempt,
+					Max:     max,
+				},
+			})
 			return
 		}
 		d.Fail(message)
+		if executor.LooksFatalUpstream(message) {
+			d.SetExitHint(executor.ExitFatalUpstream)
+		}
 
 	case "complete", "done", "finished":
 		d.deltaInput += event.InputTokens
@@ -186,7 +205,7 @@ func (d *Decoder) decodeCompletedItem(item codexItem, emit executor.EmitFunc) {
 		d.AddDetail(item.Message)
 	default:
 		if label := item.toolLabel(); label != "" && !d.toolCallItems[item.ID] {
-			d.ToolCall(item.ID, label, "", emit)
+			d.ToolCallKind(item.ID, label, "", item.toolKind(), emit)
 			d.markToolCall(item)
 		}
 		d.ToolResult(item.ID, item.resultText(), emit)
@@ -287,10 +306,32 @@ func (item codexItem) resultText() string {
 	return ""
 }
 
-// isNonFatalNotice 判断 error 事件是否为可忽略的重连提示。
-func isNonFatalNotice(message string) bool {
-	lower := strings.ToLower(strings.TrimSpace(message))
-	return strings.HasPrefix(lower, "reconnecting") || strings.Contains(lower, "retrying")
+func (item codexItem) toolKind() string {
+	if item.Type == "command_execution" {
+		return executor.ToolKindShell
+	}
+	return ""
+}
+
+var codexRetryRe = regexp.MustCompile(`(?i)^(reconnecting|retrying)\b.*?(\d+)\s*/\s*(\d+)`)
+
+// classifyCodexNotice 只认重连或重试开头的文案，避免把 “not retrying” 当成活动。
+func classifyCodexNotice(message string) (kind string, attempt, max int, ok bool) {
+	text := strings.TrimSpace(message)
+	lower := strings.ToLower(text)
+	switch {
+	case strings.HasPrefix(lower, "reconnecting"):
+		kind = executor.ActivityReconnecting
+	case strings.HasPrefix(lower, "retrying"):
+		kind = executor.ActivityRetrying
+	default:
+		return "", 0, 0, false
+	}
+	if groups := codexRetryRe.FindStringSubmatch(text); groups != nil {
+		attempt, _ = strconv.Atoi(groups[2])
+		max, _ = strconv.Atoi(groups[3])
+	}
+	return kind, attempt, max, true
 }
 
 func maxInt(a, b int) int {

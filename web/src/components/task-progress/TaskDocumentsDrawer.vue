@@ -3,7 +3,7 @@
     :open="open"
     :width="drawerWidth"
     :closable="false"
-    :mask-closable="false"
+    :mask-closable="true"
     :body-style="{ padding: 0, overflow: 'hidden' }"
     root-class-name="task-documents-drawer"
     @close="requestClose"
@@ -369,7 +369,9 @@ async function loadTree() {
     if (requestVersion !== treeLoadVersion) return
     taskDirectory.value = result.task_dir || ''
     const nextMap = new Map<string, FileTreeNode>()
-    treeData.value = (result.tree || []).map((node) => mapTreeNode(node, nextMap))
+    treeData.value = prioritizeTaskDocument(result.tree || []).map((node) =>
+      mapTreeNode(node, nextMap),
+    )
     fileMap.value = nextMap
     expandedKeys.value = [...nextMap.values()].filter((node) => node.isDir).map((node) => node.key)
     const firstFile = findFirstFile(treeData.value)
@@ -380,6 +382,15 @@ async function loadTree() {
   } finally {
     if (requestVersion === treeLoadVersion) treeLoading.value = false
   }
+}
+
+function prioritizeTaskDocument(nodes: TaskFileNode[]) {
+  return [...nodes].sort((left, right) => {
+    const leftIsTaskDocument = !left.is_dir && left.name.toLowerCase() === 'task.md'
+    const rightIsTaskDocument = !right.is_dir && right.name.toLowerCase() === 'task.md'
+    if (leftIsTaskDocument === rightIsTaskDocument) return 0
+    return leftIsTaskDocument ? -1 : 1
+  })
 }
 
 function mapTreeNode(node: TaskFileNode, target: Map<string, FileTreeNode>): FileTreeNode {
@@ -665,13 +676,13 @@ function formatFileSize(size?: number) {
 }
 .documents-header {
   display: flex;
-  min-height: 93px;
+  min-height: 72px;
   flex: 0 0 auto;
   box-sizing: border-box;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid #d9d9d9;
-  padding: 26px 32px;
+  padding: 16px 24px;
 }
 .documents-header-actions {
   display: flex;

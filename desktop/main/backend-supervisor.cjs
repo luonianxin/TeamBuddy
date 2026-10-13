@@ -188,9 +188,9 @@ function resolveBackendLaunch({ isPackaged, resourcesPath, repoRoot, platform })
   }
 }
 
-// 这些目录来自 TeamsBoard 当前支持 CLI 的已核验上游 macOS 发布渠道默认值，
+// 这些目录来自 TeamBuddy 当前支持 CLI 的已核验上游 macOS 发布渠道默认值，
 // 再加 Homebrew 在 Apple Silicon/Intel 上的标准 prefix；其中 Grok CLI 是其
-// 社区项目的发布渠道，并非 xAI 官方产品。TeamsBoard 只按 grok 命令名发现，
+// 社区项目的发布渠道，并非 xAI 官方产品。TeamBuddy 只按 grok 命令名发现，
 // 无法据此确认具体发行来源。npm 自定义 prefix、nvm/fnm/Volta 等版本管理器
 // 不在这里猜测或扫描，由用户 shell 的有效 PATH 提供。
 function macCliSearchDirs(homeDir) {

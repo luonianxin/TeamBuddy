@@ -63,7 +63,7 @@ async function handleLogin(form: {
       id: cloudUser.id || '',
       username: cloudUser.username || form.username,
       displayName:
-        cloudUser.display_name || cloudUser.displayName || form.username,
+        cloudUser.display_name?.trim() || cloudUser.displayName?.trim() || undefined,
       avatar: cloudUser.avatar,
       role: cloudUser.role,
     }
@@ -99,7 +99,7 @@ watch(() => authStore.cloudLoggedIn, (loggedIn) => {
   <div v-else class="workbench-page">
     <section class="login-card">
       <div class="brand-mark" aria-hidden="true">
-        <img src="@/assets/logo.svg" alt="TeamsBoard" />
+        <img src="@/assets/logo.svg" alt="TeamBuddy" />
       </div>
 
       <div v-if="configState === 'loading'" class="card-state loading-state">

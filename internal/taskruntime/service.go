@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"goteams-client/internal/cloudsync"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -213,12 +214,14 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (taskUUID string, 
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO gt_tasks
-		(uuid, source_type, cloud_source_key, cloud_user_id, work_item_type, work_item_id, workspace_id, project_uuid,
+		(uuid, source_type, cloud_source_key, cloud_user_id, work_item_type, work_item_id,
+		 cloud_work_item_type, cloud_work_item_id, workspace_id, project_uuid,
 		 title, content_snapshot, priority, planned_start_date, planned_end_date, task_dir_id, task_dir, task_md_path,
 		 selected_pipeline_uuid, selected_pipeline_config_json, pipeline_snapshot_uuid, selected_expert_group_uuid, execution_mode, execution_tool,
 		 status, execution_status, current_step_uuid, current_step_completed, work_dir, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', '', 0, ?, ?, ?)`,
-		taskUUID, in.SourceType, in.CloudSourceKey, in.CloudUserID, in.WorkItemType, in.WorkItemID, in.WorkspaceID,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', '', 0, ?, ?, ?)`,
+		taskUUID, in.SourceType, in.CloudSourceKey, in.CloudUserID, in.WorkItemType, in.WorkItemID,
+		in.WorkItemType, in.WorkItemID, in.WorkspaceID,
 		strings.TrimSpace(in.ProjectUUID), in.Title, in.Content, strings.TrimSpace(in.Priority), strings.TrimSpace(in.PlannedStartDate), strings.TrimSpace(in.PlannedEndDate), taskDirID, taskDir, taskMDPath,
 		strings.TrimSpace(in.SelectedPipelineUUID), strings.TrimSpace(in.SelectedPipelineConfigJSON), snapshotUUID,
 		strings.TrimSpace(in.SelectedExpertGroupUUID), in.ExecutionMode, in.ExecutionTool, status, workDirs[0], now, now)
@@ -750,6 +753,13 @@ func (s *Service) Delete(ctx context.Context, taskUUID string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := cloudsync.CaptureTaskExecutionTx(ctx, tx, taskUUID); err != nil {
+		return err
+	}
+	sessionUUIDs, err := DeleteTaskSessionRowsTx(ctx, tx, taskUUID)
+	if err != nil {
+		return err
+	}
 	for _, statement := range []string{
 		`DELETE FROM gt_task_notifications WHERE task_uuid = ?`,
 		`DELETE FROM gt_task_execution_history WHERE task_uuid = ?`,
@@ -768,6 +778,7 @@ func (s *Service) Delete(ctx context.Context, taskUUID string) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	RemoveSessionArtifacts(sessionUUIDs)
 	root, _ := filepath.Abs(s.taskRoot)
 	target, _ := filepath.Abs(taskDir)
 	rel, relErr := filepath.Rel(root, target)

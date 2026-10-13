@@ -18,28 +18,64 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-.scrollbar--subtle {
-  scrollbar-color: transparent transparent;
-  scrollbar-width: thin;
+body.goteams-windows-desktop {
+  --goteams-window-titlebar-height: env(titlebar-area-height, 32px);
 }
 
-.scrollbar--subtle::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+/* Windows 使用原生标题栏覆盖。Portal 弹层必须停在标题栏下方，避免遮挡或拦截
+   最小化、最大化和关闭按钮；浏览器与 macOS 不应用该偏移。 */
+body.goteams-windows-desktop .ant-modal-root .ant-modal-mask,
+body.goteams-windows-desktop .ant-modal-root .ant-modal-wrap,
+body.goteams-windows-desktop .ant-drawer,
+body.goteams-windows-desktop .login-mask,
+body.goteams-windows-desktop .ct-mask,
+body.goteams-windows-desktop .linear-task-root,
+body.goteams-windows-desktop .work-item-root,
+body.goteams-windows-desktop .configure-root {
+  top: var(--goteams-window-titlebar-height);
 }
 
-.scrollbar--subtle::-webkit-scrollbar-track {
+body.goteams-windows-desktop .linear-task-root {
+  height: auto;
+}
+
+*::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: #c9cdd4;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #aab2bd;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-color: #c9cdd4 transparent;
+    scrollbar-width: thin;
+  }
+
+  .scrollbar--subtle {
+    scrollbar-color: transparent transparent;
+  }
+
+  .scrollbar--subtle:hover,
+  .scrollbar--subtle:focus-within {
+    scrollbar-color: rgba(140, 149, 168, 0.42) transparent;
+  }
 }
 
 .scrollbar--subtle::-webkit-scrollbar-thumb {
-  border-radius: 6px;
   background: transparent;
-}
-
-.scrollbar--subtle:hover,
-.scrollbar--subtle:focus-within {
-  scrollbar-color: rgba(140, 149, 168, 0.42) transparent;
 }
 
 .scrollbar--subtle:hover::-webkit-scrollbar-thumb,

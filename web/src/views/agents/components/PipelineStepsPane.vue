@@ -202,9 +202,7 @@ onDeactivated(() => {
   min-height: 0;
   flex: 1;
   overflow-y: auto;
-  padding: 0;
-  scrollbar-color: #d8dde5 transparent;
-  scrollbar-width: thin;
+  padding: 0 0 24px;
 }
 
 .step-list--batch {

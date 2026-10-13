@@ -612,6 +612,38 @@ func CloudSourceKey(baseURL string) string {
 	return fmt.Sprintf("%x", sum[:16])
 }
 
+// CloudSourceKeys returns the key of baseURL and, when the URL is http or https,
+// the key of the same host and path under the other scheme. A Windows package that
+// only flips http and https must still find tasks bound that morning. Different
+// hosts, including goteams.cn and goteams.ai, stay distinct.
+func CloudSourceKeys(baseURL string) (primary, alternate string) {
+	primary = CloudSourceKey(baseURL)
+	variant := schemeVariantURL(baseURL)
+	if variant == "" {
+		return primary, primary
+	}
+	alternate = CloudSourceKey(variant)
+	if alternate == "" {
+		return primary, primary
+	}
+	return primary, alternate
+}
+
+func schemeVariantURL(baseURL string) string {
+	raw := strings.TrimSpace(baseURL)
+	lower := strings.ToLower(raw)
+	const httpsScheme = "https://"
+	const httpScheme = "http://"
+	switch {
+	case strings.HasPrefix(lower, httpsScheme):
+		return httpScheme + raw[len(httpsScheme):]
+	case strings.HasPrefix(lower, httpScheme):
+		return httpsScheme + raw[len(httpScheme):]
+	default:
+		return ""
+	}
+}
+
 // SyncCloud refreshes the in-memory cloud pipeline cache for the supplied cloud
 // endpoint. The cloud payload does not include the CLI and model chosen on this
 // client, so those values are restored from gt_cloud_pipeline_step_execution.

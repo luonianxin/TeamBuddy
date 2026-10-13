@@ -64,7 +64,7 @@ class TrayManager {
     const status = this.getTaskStatus()
     return status.known && status.count > 0
       ? t('tray.tooltip.runningTasks', { count: status.count })
-      : 'TeamsBoard'
+      : 'TeamBuddy'
   }
 
   getMenuTemplate() {

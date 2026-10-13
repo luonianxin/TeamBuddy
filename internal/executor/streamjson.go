@@ -25,6 +25,14 @@ type StreamJSONEvent struct {
 	PermissionDenials []PermissionDeny  `json:"permission_denials"`
 	Message           StreamJSONMessage `json:"message"`
 	Usage             StreamJSONUsage   `json:"usage"`
+	Attempt           int               `json:"attempt"`
+	MaxRetries        int               `json:"max_retries"`
+	RetryDelayMs      int64             `json:"retry_delay_ms"`
+	ErrorStatus       json.RawMessage   `json:"error_status"`
+	Error             json.RawMessage   `json:"error"`
+	APIErrorStatus    int               `json:"api_error_status"`
+	TerminalReason    string            `json:"terminal_reason"`
+	StopReason        string            `json:"stop_reason"`
 }
 
 // StreamJSONMessage 是消息信封，承载内容块数组。
@@ -49,6 +57,8 @@ type StreamJSONUsage struct {
 // 各 CLI 的差异（是否有思考块、是否有权限拒绝）由数据决定，无需分别实现。
 type StreamJSONDecoder struct {
 	BaseDecoder
+	// modelCall 为真时，本轮模型请求的「正在请求」提示已经发出，避免每个流式分片都再发一次。
+	modelCall bool
 }
 
 // NewStreamJSONDecoder 创建 stream-json 协议解码器。
@@ -71,11 +81,13 @@ func (d *StreamJSONDecoder) Decode(raw string, emit EmitFunc) {
 
 	switch event.Type {
 	case "assistant":
+		d.modelCall = false
 		DecodeContentBlocks(event.Message.Content, &d.BaseDecoder, emit)
 		// 部分版本把最终文本直接放在顶层 content
 		d.Message(RawText(event.Content), emit)
 
 	case "user":
+		d.modelCall = false
 		// 工具结果在 user 消息的内容块里回传，必须一并解析，否则工具调用只有请求没有结果
 		for _, block := range event.Message.Content {
 			if block.Type == "tool_result" {
@@ -94,15 +106,67 @@ func (d *StreamJSONDecoder) Decode(raw string, emit EmitFunc) {
 		d.Thinking(RawText(event.Content), emit)
 
 	case "tool_use", "tool_call":
+		d.modelCall = false
 		// 顶层形态不带可信的工具调用 ID（同层的 id 是 message id），故不传，避免误配对。
 		d.ToolCall("", event.Name, FormatToolArgs(event.Input), emit)
 
 	case "tool_result":
+		d.modelCall = false
 		d.ToolResult(event.ToolUseID, RawText(event.Content), emit)
 
 	case "result":
+		d.modelCall = false
 		d.handleResult(event, emit)
+
+	case "system":
+		d.handleSystem(event, emit)
+
+	case "stream_event":
+		d.noteModelCall(emit)
+		d.Heartbeat(emit)
 	}
+}
+
+// noteModelCall 把「模型请求已经开始」交给看门狗。
+// 流式分片本身只刷新心跳，避免每个 token 都再占一条活动。
+func (d *StreamJSONDecoder) noteModelCall(emit EmitFunc) {
+	if d.modelCall {
+		return
+	}
+	d.modelCall = true
+	emit(ExecutorEvent{
+		Type:     EventActivity,
+		Content:  ActivityCallingModel,
+		Activity: &ActivityInfo{Kind: ActivityCallingModel},
+	})
+}
+
+func (d *StreamJSONDecoder) handleSystem(event StreamJSONEvent, emit EmitFunc) {
+	switch event.Subtype {
+	case "init":
+		d.SetSession(event.SessionID)
+	case "api_retry":
+		d.modelCall = false
+		d.protocolSeen = true
+		info := &ActivityInfo{
+			Kind:    ActivityRetrying,
+			Attempt: event.Attempt,
+			Max:     event.MaxRetries,
+			DelayMs: event.RetryDelayMs,
+		}
+		if text := rawJSONText(event.Error); LooksFatalUpstream(text) || LooksFatalUpstream(rawJSONText(event.ErrorStatus)) {
+			d.SetExitHint(ExitFatalUpstream)
+			info.Detail = text
+		}
+		emit(ExecutorEvent{Type: EventActivity, Content: ActivityRetrying, Activity: info, SessionID: d.sessionID})
+	default:
+		d.Heartbeat(emit)
+	}
+}
+
+func rawJSONText(raw json.RawMessage) string {
+	text := strings.TrimSpace(RawText(raw))
+	return strings.Trim(text, `"`)
 }
 
 // Done 在输出结束后校验终态事件。
@@ -127,6 +191,12 @@ func (d *StreamJSONDecoder) handleResult(event StreamJSONEvent, emit EmitFunc) {
 		d.Permission(SummarizePermissionRequests(d.DisplayName, requests), requests, emit)
 	}
 
+	if class := classifyClaudeResult(event); class != "" {
+		d.SetExitHint(class)
+	} else if !event.IsError {
+		d.ClearExitHint()
+	}
+
 	if event.IsError {
 		reason := strings.TrimSpace(event.Result)
 		if reason == "" {
@@ -143,7 +213,50 @@ func (d *StreamJSONDecoder) handleResult(event StreamJSONEvent, emit EmitFunc) {
 			reason = d.DisplayName + " 返回错误结果，但未提供错误详情"
 		}
 		d.Fail(reason)
+		if LooksFatalUpstream(reason) || looksFatalErrorList(event.Errors) {
+			d.SetExitHint(ExitFatalUpstream)
+		}
 	}
+}
+
+func looksFatalErrorList(errors []string) bool {
+	for _, item := range errors {
+		if LooksFatalUpstream(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func classifyClaudeResult(event StreamJSONEvent) ExitClass {
+	if event.StopReason == "refusal" {
+		return ExitFatalUpstream
+	}
+	switch event.Subtype {
+	case "error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries":
+		return ExitFatalCLI
+	case "error_during_execution":
+		if event.TerminalReason == "api_error" {
+			return ExitTransport
+		}
+		return ExitFatalCLI
+	case "success":
+		if !event.IsError {
+			return ""
+		}
+		if event.TerminalReason == "api_error" {
+			switch event.APIErrorStatus {
+			case 401, 403:
+				return ExitFatalUpstream
+			case 0, 429, 500, 502, 503, 529:
+				return ExitTransport
+			}
+		}
+	}
+	if event.IsError && (LooksFatalUpstream(event.Result) || looksFatalErrorList(event.Errors)) {
+		return ExitFatalUpstream
+	}
+	return ""
 }
 
 // SummarizePermissionRequests 生成权限请求提示文案。

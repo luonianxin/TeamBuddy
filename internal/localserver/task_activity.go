@@ -61,7 +61,7 @@ func vibeCodingAssignmentProgressUUID(taskUUID string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("vibe-coding-assignment:"+taskUUID)).String()
 }
 
-// isTeamsboardKickoffPrompt reports the launch instruction TeamsBoard sends to the tool.
+// isTeamsboardKickoffPrompt reports the launch instruction TeamBuddy sends to the tool.
 // That text is not the user's task input.
 func isTeamsboardKickoffPrompt(text string) bool {
 	text = strings.TrimSpace(text)

@@ -147,6 +147,16 @@ func (o *Orchestrator) recordExpertDispatch(ctx context.Context, sessionUUID, ta
 		_, _ = o.db.ExecContext(ctx, `UPDATE gt_tasks SET status=CASE WHEN status='done' THEN status ELSE 'active' END,
 			execution_status='idle', updated_at=? WHERE uuid=?`, now, taskUUID)
 	}
+	notificationStatus := map[string]string{
+		"blocked": "failed",
+		"paused":  "interrupted",
+	}[dispatchStatus]
+	if notificationStatus != "" {
+		if _, err := o.db.ExecContext(ctx, `UPDATE gt_task_notifications SET terminal_status=?
+			WHERE task_uuid=? AND terminal_status IN ('created', 'running')`, notificationStatus, taskUUID); err != nil {
+			applog.Warn("[ExpertGroup] 收口会话通知状态失败", "task_uuid", taskUUID, "status", notificationStatus, "error", err)
+		}
+	}
 	if o.stateBroadcaster != nil {
 		o.stateBroadcaster(taskUUID, "", sessionUUID, dispatchStatus)
 	}

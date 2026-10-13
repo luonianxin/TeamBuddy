@@ -165,7 +165,7 @@
           alt=""
           aria-hidden="true"
         />
-        <span class="direct-execution-label">{{ t('workflows.task.common.directExecution') }}</span>
+        <span class="direct-execution-label">{{ t('workflows.task.assign.vibeCodingMode') }}</span>
         <strong>{{ vibeCodingToolName }}</strong>
         <div class="direct-execution-actions">
           <button
@@ -258,13 +258,20 @@
       <template v-else>
         <div class="pipeline-card-head">
           <PipelineFlowIcon class="pipeline-card-icon" />
-          <span class="pipeline-card-label">{{ t('workflows.task.common.pipeline') }}</span>
+          <span class="pipeline-card-label">{{
+            task.execution_mode === 'pipeline'
+              ? t('workflows.task.common.pipeline')
+              : t('workflows.task.assign.executionMode')
+          }}</span>
           <span
             class="pipeline-card-sep"
             aria-hidden="true"
           ></span>
           <strong class="pipeline-card-name">{{
-            task.pipeline_name_snapshot || t('workflows.task.common.unassignedPipeline')
+            task.pipeline_name_snapshot ||
+              (task.execution_mode === 'pipeline'
+                ? t('workflows.task.common.unassignedPipeline')
+                : t('workflows.task.common.unassignedExecution'))
           }}</strong>
           <button
             type="button"
@@ -453,7 +460,7 @@
               aria-hidden="true"
             />
           </div>
-          <p>{{ t('workflows.task.common.unassignedPipeline') }}</p>
+          <p>{{ t('workflows.task.common.unassignedExecution') }}</p>
           <span>{{ t('workflows.task.detail.unassignedDescription') }}</span>
         </div>
       </div>
@@ -631,6 +638,7 @@ import { isUserMessage, resultText, userMessageText } from '@/components/task-pr
 import { copyText } from '@/utils/clipboard'
 import { isStopConfirmSuppressed, suppressStopConfirm } from '@/utils/stopConfirm'
 import { useDocumentTitle } from '@/composables/useDocumentTitle'
+import { readComposerDraft, writeComposerDraft } from '@/composables/useComposerDraft'
 import { openTerminal } from '@/composables/useDesktop'
 import { useLocalWS, useLocalWSStatus } from '@/composables/useLocalWebSocket'
 import {
@@ -748,7 +756,12 @@ const completing = ref(false)
 const stoppingSessionUuid = ref('')
 const progress = ref<TaskProgress[]>([])
 const selectedStepUuid = ref('')
-const question = ref('')
+const question = ref(readComposerDraft(resolvedTaskUuid.value))
+watch(resolvedTaskUuid, (next, prev) => {
+  if (prev && prev !== next) writeComposerDraft(prev, question.value)
+  question.value = readComposerDraft(next)
+})
+watch(question, (value) => writeComposerDraft(resolvedTaskUuid.value, value))
 const highlightUuid = ref('')
 const messageListRef = ref<InstanceType<typeof StepMessageList>>()
 const stopConfirmOpen = ref(false)
@@ -1172,8 +1185,12 @@ function scheduleRefresh() {
   }, 2000)
 }
 
-useLocalWS('task.changed', (data: { task_uuid?: string }) => {
+useLocalWS('task.changed', (data: { task_uuid?: string; deleted?: boolean }) => {
   if (data.task_uuid === resolvedTaskUuid.value) {
+    if (data.deleted) {
+      returnToBoard()
+      return
+    }
     void load(true)
     emit('changed')
   }

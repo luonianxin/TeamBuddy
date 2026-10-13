@@ -7,20 +7,21 @@ import (
 
 // CLI type constant
 const (
-	CLITypeCodex     = "codex"
-	CLITypeClaude    = "claude"
-	CLITypeCodeBuddy = "codebuddy"
-	CLITypeOpenCode  = "opencode"
-	CLITypeCursor    = "cursor"
-	CLITypeCopilot   = "copilot"
-	CLITypeGrok      = "grok"
-	CLITypeHermes    = "hermes"
-	CLITypeKimi      = "kimi"
-	CLITypeQoder     = "qoder"
-	CLITypeQoderCN   = "qoder-cn"
-	CLITypeQwen      = "qwen"
-	CLITypeOpenClaw  = "openclaw"
-	CLITypePi        = "pi"
+	CLITypeCodex       = "codex"
+	CLITypeClaude      = "claude"
+	CLITypeCodeBuddy   = "codebuddy"
+	CLITypeOpenCode    = "opencode"
+	CLITypeCursor      = "cursor"
+	CLITypeCopilot     = "copilot"
+	CLITypeGrok        = "grok"
+	CLITypeHermes      = "hermes"
+	CLITypeKimi        = "kimi"
+	CLITypeQoder       = "qoder"
+	CLITypeQoderCN     = "qoder-cn"
+	CLITypeQwen        = "qwen"
+	CLITypeOpenClaw    = "openclaw"
+	CLITypePi          = "pi"
+	CLITypeAntigravity = "antigravity"
 )
 
 // Event type constant
@@ -34,7 +35,37 @@ const (
 	EventComplete   = "complete"
 	EventError      = "error"
 	EventUsage      = "usage"
+	// EventActivity 只广播到执行过程汇总行，不写入 gt_session_events。
+	EventActivity = "activity"
+	// EventHeartbeat 只刷新看门狗，不进入事件通道。
+	EventHeartbeat = "heartbeat"
 )
+
+// 活动文案用固定短词，前端按词映射成句子。
+const (
+	ActivityReconnecting = "reconnecting"
+	ActivityRetrying     = "retrying"
+	ActivityQuiet        = "quiet"
+	ActivityLongTool     = "long_tool"
+	ActivityCompacting   = "compacting"
+	ActivityResumed      = "resumed"
+	ActivitySuspect      = "suspect"
+	ActivitySlowLaunch   = "slow_launch"
+	// ActivityCallingModel 表示 CLI 已经开始一次模型请求，静默只是还没有 token。
+	ActivityCallingModel = "calling_model"
+	// ActivityModelLost 表示这次模型请求的外部连接已经不在，且 CLI 没有宣布重试。
+	ActivityModelLost = "model_lost"
+)
+
+// ActivityInfo 是重连、重试和卡死提示附带的结构化信息。
+type ActivityInfo struct {
+	Kind      string `json:"kind,omitempty"`
+	Attempt   int    `json:"attempt,omitempty"`
+	Max       int    `json:"max,omitempty"`
+	DelayMs   int64  `json:"delay_ms,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	Escalated bool   `json:"escalated,omitempty"`
+}
 
 // PermissionRequest CLI rejects and returns a tool permission request in non-interactive mode.
 type PermissionRequest struct {
@@ -53,7 +84,17 @@ type ExecutorEvent struct {
 	// 协议未提供该字段时为空，此时不得按顺序猜测归属。
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	// ToolResultPartial 表示增量输出；只有最终 tool_result 才结束工具执行计时。
-	ToolResultPartial  bool                `json:"tool_result_partial,omitempty"`
+	ToolResultPartial bool `json:"tool_result_partial,omitempty"`
+	// ToolKind 是协议侧的工具种类。shell 表示这条调用会拉起子进程。空字符串表示未知。
+	ToolKind string `json:"tool_kind,omitempty"`
+	// ToolResultInterrupted 表示进程中断时这条工具还没有终态结果，由编排器补发。
+	ToolResultInterrupted bool `json:"tool_result_interrupted,omitempty"`
+	// InterruptedAttempt 是被中断的那次执行序号，从 1 开始。
+	InterruptedAttempt int `json:"interrupted_attempt,omitempty"`
+	// Activity 附在 type=activity 的事件上。
+	Activity *ActivityInfo `json:"activity,omitempty"`
+	// ExitClass 附在终态事件上，编排器据此决定续跑。
+	ExitClass          string              `json:"exit_class,omitempty"`
 	InputTokens        int                 `json:"input_tokens,omitempty"`
 	OutputTokens       int                 `json:"output_tokens,omitempty"`
 	Error              string              `json:"error,omitempty"`
@@ -69,6 +110,10 @@ type RunOptions struct {
 	ModelProfile string            //Model name
 	ExtraArgs    []string          // Additional command line parameters
 	EnvVars      map[string]string // environment variables
+	// PresetSessionID 是首轮由调用方指定的会话 ID。续跑仍走 ResumeOptions.ExternalSessionID。
+	PresetSessionID string
+	// Watchdog 为空时使用 DefaultWatchdogConfig。
+	Watchdog WatchdogConfig
 }
 
 // ResumeOptions Continue dialog execution options

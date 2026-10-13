@@ -3,11 +3,13 @@ package bootstrap
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"time"
 
 	"goteams-client/internal/applog"
 	"goteams-client/internal/cloud"
 	"goteams-client/internal/executor"
+	"goteams-client/internal/executor/antigravity"
 	"goteams-client/internal/executor/claude"
 	"goteams-client/internal/executor/codebuddy"
 	"goteams-client/internal/executor/codex"
@@ -55,6 +57,7 @@ func NewLocalRuntime(ctx context.Context, dataDir string, cloudClient *cloud.Cli
 		applog.Warn("清理历史云端流水线本地缓存失败", "error", err)
 	}
 	eventStore := storagelog.NewEventStore(db)
+	executor.ReapStaleGroups(filepath.Join(filepath.Dir(dataDir), "runtime"))
 	registerExecutorFactories()
 	orchestrator := workflow.NewOrchestrator(db, db, eventStore)
 	wsHub := localserver.NewWSHub(db)
@@ -87,6 +90,7 @@ func NewLocalRuntime(ctx context.Context, dataDir string, cloudClient *cloud.Cli
 		manager: manager, DB: db, EventStore: eventStore,
 		Orchestrator: orchestrator, WSHub: wsHub,
 	}
+	workflow.StartSessionCleanup(ctx, db, nil)
 	go func() {
 		if err := orchestrator.HandleCrashRecovery(); err != nil {
 			applog.Error("崩溃恢复失败", "error", err)
@@ -98,6 +102,9 @@ func NewLocalRuntime(ctx context.Context, dataDir string, cloudClient *cloud.Cli
 func (r *LocalRuntime) Close() {
 	if r == nil {
 		return
+	}
+	if r.Orchestrator != nil {
+		r.Orchestrator.StopActiveProcesses()
 	}
 	if r.WSHub != nil {
 		r.WSHub.Close()
@@ -125,4 +132,5 @@ func registerExecutorFactories() {
 	workflow.RegisterAdapterFactory(executor.CLITypeQwen, qwen.NewAdapter)
 	workflow.RegisterAdapterFactory(executor.CLITypeOpenClaw, openclaw.NewAdapter)
 	workflow.RegisterAdapterFactory(executor.CLITypePi, pi.NewAdapter)
+	workflow.RegisterAdapterFactory(executor.CLITypeAntigravity, antigravity.NewAdapter)
 }

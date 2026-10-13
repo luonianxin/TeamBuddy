@@ -177,6 +177,9 @@ func (m *JWTManager) checkAndRefresh(ctx context.Context, cloudClient *cloud.Cli
 	}
 
 	resp, err := cloudClient.RefreshToken(ctx, token)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		// Refresh failed, clear if expired
 		if now >= expiry {

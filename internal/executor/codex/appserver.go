@@ -33,6 +33,7 @@ import (
 const (
 	appServerStartupTimeout = 30 * time.Second
 	appServerMaxModels      = 1000 // safety cap for pathological pagination
+	appServerMaxPages       = 100
 	appServerClientName     = "goteams"
 	appServerClientVersion  = "0.1.0"
 )
@@ -87,20 +88,27 @@ type notification struct {
 // JSON-RPC pipes. The session is initialized on creation so callers can issue
 // model/list (and other) requests immediately.
 type AppServerSession struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Scanner
-	mu     sync.Mutex
-	nextID int
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	lines     chan []byte
+	stop      chan struct{}
+	readDone  chan struct{}
+	readErr   error // lines 关闭后可读；关闭通道同步读循环的写入。
+	mu        sync.Mutex
+	nextID    int
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // StartAppServer launches `codex app-server`, performs the required `initialize`
 // handshake, and returns a session for issuing JSON-RPC requests. The caller must
 // call Close to terminate the process.
 func StartAppServer(ctx context.Context, execPath string) (*AppServerSession, error) {
-	cmd := exec.Command(execPath, "app-server")
-	cmd.Env = environ()
-	createProcessGroupForCmd(cmd)
+	cmd, err := executor.NewCLIProbeCommand(ctx, execPath, "app-server")
+	if err != nil {
+		return nil, err
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -118,11 +126,32 @@ func StartAppServer(ctx context.Context, execPath string) (*AppServerSession, er
 	}
 
 	session := &AppServerSession{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: bufio.NewScanner(stdout),
+		cmd:      cmd,
+		stdin:    stdin,
+		stdout:   stdout,
+		lines:    make(chan []byte, 16),
+		stop:     make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
-	session.stdout.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	// Scanner 在独立读循环中工作，RPC 等待能立即响应取消，
+	// 不再等到 Scan 读到下一行才检查 context。
+	go func() {
+		defer close(session.readDone)
+		defer close(session.lines)
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case session.lines <- line:
+			case <-ctx.Done():
+				return
+			case <-session.stop:
+				return
+			}
+		}
+		session.readErr = scanner.Err()
+	}()
 
 	// Perform the mandatory initialize handshake before any other method.
 	if err := session.initialize(ctx); err != nil {
@@ -138,8 +167,18 @@ func (s *AppServerSession) Close() error {
 	if s.cmd == nil || s.cmd.Process == nil {
 		return nil
 	}
-	_ = terminateProcessTreeForPID(s.cmd.Process.Pid)
-	return s.cmd.Wait()
+	s.closeOnce.Do(func() {
+		close(s.stop)
+		_ = s.stdin.Close()
+		_ = s.stdout.Close()
+		<-s.readDone
+		terminateErr := terminateProcessTreeForPID(s.cmd.Process.Pid)
+		s.closeErr = s.cmd.Wait()
+		if terminateErr != nil {
+			s.closeErr = terminateErr
+		}
+	})
+	return s.closeErr
 }
 
 // initialize performs the JSON-RPC `initialize` handshake required by the
@@ -154,7 +193,7 @@ func (s *AppServerSession) initialize(ctx context.Context) error {
 	}, &raw); err != nil {
 		return fmt.Errorf("codex app-server 初始化失败: %w", err)
 	}
-	return nil
+	return json.NewEncoder(s.stdin).Encode(map[string]interface{}{"method": "initialized"})
 }
 
 // call sends a single JSON-RPC request and blocks until a response with the
@@ -162,30 +201,36 @@ func (s *AppServerSession) initialize(ctx context.Context) error {
 // and no response `id`) are skipped, as are non-JSON/non-matching lines.
 func (s *AppServerSession) call(ctx context.Context, method string, params interface{}, out *json.RawMessage) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// 取消也关闭 stdin，避免服务端不读请求时 Encode 卡住。
+	stopCancel := context.AfterFunc(ctx, func() { _ = s.Close() })
+	defer stopCancel()
 	s.nextID++
 	id := s.nextID
 	req := RPCRequest{JSONRPC: "2.0", Method: method, ID: id, Params: params}
 	if err := json.NewEncoder(s.stdin).Encode(req); err != nil {
-		s.mu.Unlock()
 		return fmt.Errorf("发送 %s 请求失败: %w", method, err)
 	}
-	s.mu.Unlock()
 
 	for {
+		var line []byte
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("%s 请求超时: %w", method, ctx.Err())
-		default:
-		}
-
-		if !s.stdout.Scan() {
-			if err := s.stdout.Err(); err != nil {
-				return fmt.Errorf("读取 %s 响应失败: %w", method, err)
-			}
+		case <-s.stop:
 			return fmt.Errorf("读取 %s 响应失败: 连接已关闭", method)
+		case next, ok := <-s.lines:
+			if !ok {
+				if s.readErr != nil {
+					return fmt.Errorf("读取 %s 响应失败: %w", method, s.readErr)
+				}
+				return fmt.Errorf("读取 %s 响应失败: 连接已关闭", method)
+			}
+			line = next
 		}
-
-		line := s.stdout.Bytes()
 
 		// Skip unsolicited notifications (method present, no response id).
 		var note notification
@@ -214,7 +259,8 @@ func (s *AppServerSession) call(ctx context.Context, method string, params inter
 func (s *AppServerSession) ListModels(ctx context.Context, includeHidden bool) ([]ModelInfo, error) {
 	var all []ModelInfo
 	cursor := ""
-	for {
+	seenCursors := make(map[string]bool)
+	for page := 0; page < appServerMaxPages; page++ {
 		params := map[string]interface{}{"includeHidden": includeHidden}
 		if cursor != "" {
 			params["cursor"] = cursor
@@ -231,12 +277,19 @@ func (s *AppServerSession) ListModels(ctx context.Context, includeHidden bool) (
 		}
 
 		all = append(all, res.Data...)
-		if res.NextCursor == "" || len(all) >= appServerMaxModels {
-			break
+		if len(all) > appServerMaxModels {
+			return nil, fmt.Errorf("model/list 超过模型数量限制")
 		}
+		if res.NextCursor == "" {
+			return all, nil
+		}
+		if seenCursors[res.NextCursor] {
+			return nil, fmt.Errorf("model/list 返回重复分页游标")
+		}
+		seenCursors[res.NextCursor] = true
 		cursor = res.NextCursor
 	}
-	return all, nil
+	return nil, fmt.Errorf("model/list 超过分页数量限制")
 }
 
 // ResolveModels returns the list of models available to the Codex CLI.
@@ -279,18 +332,23 @@ func ResolveModels(ctx context.Context, execPath string) []string {
 		// fall back to explicitly configured models in config.toml.
 		return resolveCodexModelsFromConfig()
 	}
-	return dedupStrings(names)
+	// 自定义 provider 的已配置模型可能不在官方列表中，但仍可通过 -m 使用。
+	return dedupStrings(append(resolveCodexModelsFromConfig(), names...))
 }
 
 // resolveCodexModelsFromConfig reads configured models from ~/.codex/config.toml.
 // It is a fallback used when the app-server model/list endpoint cannot be reached.
 func resolveCodexModelsFromConfig() []string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return []string{}
+	configDir := os.Getenv("CODEX_HOME")
+	if configDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return []string{}
+		}
+		configDir = filepath.Join(homeDir, ".codex")
 	}
 
-	configPath := filepath.Join(homeDir, ".codex", "config.toml")
+	configPath := filepath.Join(configDir, "config.toml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return []string{}
@@ -306,14 +364,7 @@ func resolveCodexModelsFromConfig() []string {
 		}
 	}
 
-	// Extract from [profiles.xxx] section
-	profileRe := regexp.MustCompile(`(?m)^\s*\[profiles\.([^\]]+)\]`)
-	profileMatches := profileRe.FindAllStringSubmatch(string(data), -1)
-	for _, match := range profileMatches {
-		if len(match) > 1 && match[1] != "" {
-			models = append(models, match[1])
-		}
-	}
+	// profile 的名称不是模型 ID；只读取各 profile 内实际声明的 model。
 
 	return dedupStrings(models)
 }

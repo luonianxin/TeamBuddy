@@ -40,6 +40,7 @@
   "workItem": {
     "title": "Original requirement",
     "view": "View original requirement",
+    "openInBrowser": "Open original requirement in browser",
     "close": "Close",
     "attributes": "Attributes",
     "taskInfo": "Task info",

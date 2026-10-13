@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"goteams-client/internal/cloudsync"
 	"goteams-client/internal/expertgroup"
 )
 
@@ -133,14 +134,21 @@ func (s *Service) SwitchExecution(ctx context.Context, taskUUID string, input Sw
 	if !sameCurrentExecution(current, latest) {
 		return fmt.Errorf("任务执行配置已变化，请刷新后重试")
 	}
+	// Capture inside the same transaction as deletion. No network dependency:
+	// an offline switch must retain the complete previous run for later upload.
+	if err = cloudsync.CaptureTaskExecutionTx(ctx, tx, taskUUID); err != nil {
+		return fmt.Errorf("保存执行同步快照失败: %w", err)
+	}
 	if err = archiveCurrentExecutionTx(ctx, tx, taskUUID); err != nil {
 		return fmt.Errorf("归档当前执行失败: %w", err)
 	}
 
+	sessionUUIDs, err := DeleteTaskSessionRowsTx(ctx, tx, taskUUID)
+	if err != nil {
+		return err
+	}
 	for _, statement := range []string{
 		`DELETE FROM gt_task_notifications WHERE task_uuid=?`,
-		`DELETE FROM gt_session_events WHERE session_uuid IN (SELECT uuid FROM gt_cli_sessions WHERE task_uuid=?)`,
-		`DELETE FROM gt_conversation_summaries WHERE session_uuid IN (SELECT uuid FROM gt_cli_sessions WHERE task_uuid=?)`,
 		`DELETE FROM gt_task_progress WHERE task_uuid=?`,
 		`DELETE FROM gt_cli_sessions WHERE task_uuid=?`,
 		`DELETE FROM gt_task_steps WHERE task_uuid=?`,
@@ -160,6 +168,7 @@ func (s *Service) SwitchExecution(ctx context.Context, taskUUID string, input Sw
 		return err
 	}
 	committed = true
+	RemoveSessionArtifacts(sessionUUIDs)
 	return nil
 }
 

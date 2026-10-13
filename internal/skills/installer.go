@@ -14,16 +14,18 @@ import (
 )
 
 const (
-	TaskSkillName                    = "teamsboard"
+	TaskSkillName = "teamsboard"
+	// S-BE005, DA-003: ImBotCLISkillName 是 teamsboard-im-bot-cli 内置 Skill 的名称
+	ImBotCLISkillName                = "teamsboard-im-bot-cli"
 	CapabilityReasonNotManaged       = "skill_not_managed"
 	CapabilityReasonInstallationFail = "skill_install_failed"
 	managedMarker                    = ".goteams-managed.json"
 )
 
 var (
-	ErrTargetNotManaged   = errors.New("同名 Skill 已存在且不由 TeamsBoard 管理")
-	ErrManagedUserChanged = errors.New("TeamsBoard 托管 Skill 已被用户修改")
-	errManagedCurrent     = errors.New("TeamsBoard 托管 Skill 已是最新版本")
+	ErrTargetNotManaged   = errors.New("同名 Skill 已存在且不由 TeamBuddy 管理")
+	ErrManagedUserChanged = errors.New("TeamBuddy 托管 Skill 已被用户修改")
+	errManagedCurrent     = errors.New("TeamBuddy 托管 Skill 已是最新版本")
 )
 
 type managedMetadata struct {
@@ -31,7 +33,7 @@ type managedMetadata struct {
 	Digest string `json:"digest"`
 }
 
-// InstallBuiltin synchronizes only the built-in Skill owned by TeamsBoard. It
+// InstallBuiltin synchronizes only the built-in Skill owned by TeamBuddy. It
 // never traverses or changes sibling directories below the skill root.
 // A skill root that is a symlink is resolved once to a real directory inside
 // the user home; later writes use that path, so replacing the original link
@@ -294,4 +296,17 @@ func digestEntries(entries map[string][]byte) string {
 		hash.Write([]byte{0})
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+// S-BE005, DA-003: InstallImBotCLISkill 安装 teamsboard-im-bot-cli 内置 Skill
+// 复用 InstallBuiltin 的机制，将 teamsboard-im-bot-cli 目录复制到用户 skill 目录
+func InstallImBotCLISkill(sourceFS fs.FS, targetRoot string) error {
+	root, err := writableSkillRoot(targetRoot)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return fmt.Errorf("创建 Skill 根目录失败: %w", err)
+	}
+	return installOne(sourceFS, root, ImBotCLISkillName)
 }

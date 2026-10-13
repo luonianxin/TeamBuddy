@@ -92,9 +92,9 @@
               aria-hidden="true"
             />
             <span class="direct-execution-summary__label">{{
-              t('workflows.task.common.directExecution')
+              t('workflows.task.assign.vibeCodingMode')
             }}</span>
-            <strong>{{ `${t('workflows.task.create.vibeCodingMode')} · ${vibeCodingToolName}` }}</strong>
+            <strong>{{ vibeCodingToolName }}</strong>
           </div>
           <div
             v-else-if="isCLI"
@@ -115,7 +115,7 @@
             v-else
             class="step-region-empty"
           >
-            {{ t('workflows.task.common.unassignedPipeline') }}
+            {{ t('workflows.task.common.unassignedExecution') }}
           </div>
         </div>
       </template>
@@ -282,7 +282,7 @@
               />
             </div>
             <FolderOutlined />
-            <h3>{{ t('workflows.task.common.unassignedPipeline') }}</h3>
+            <h3>{{ t('workflows.task.common.unassignedExecution') }}</h3>
             <p>{{ t('workflows.task.notifications.unassignedDescription') }}</p>
           </div>
         </template>
@@ -371,6 +371,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import NewConversation from './NewConversation.vue'
 import { useConversationStore } from '@/stores/conversation'
+import { readComposerDraft, writeComposerDraft } from '@/composables/useComposerDraft'
 import {
   CheckCircleOutlined,
   CodeOutlined,
@@ -470,6 +471,14 @@ const stoppingSessionUuid = ref('')
 const stopConfirmOpen = ref(false)
 const stopConfirmSessionUuid = ref('')
 const question = ref('')
+watch(selectedTaskUuid, (next, prev) => {
+  if (prev && prev !== next) writeComposerDraft(prev, question.value)
+  question.value = next ? readComposerDraft(next) : ''
+})
+watch(question, (value) => {
+  if (!selectedTaskUuid.value) return
+  writeComposerDraft(selectedTaskUuid.value, value)
+})
 const composerRef = ref<InstanceType<typeof ChatComposer>>()
 const highlightUuid = ref('')
 const pipelineExpanded = ref(true)
@@ -684,6 +693,14 @@ const taskStatus = computed(() => statusValue(task.value?.status))
 const taskStatusText = computed(() => taskStatusLabels.value[taskStatus.value] || taskStatus.value)
 const taskPriorityText = computed(
   () => taskPriorityLabels.value[String(task.value?.priority || '').toLowerCase()] || '',
+)
+
+// 详情状态可能来自接口、内存缓存或持久化缓存；无论来源如何，都同步给侧栏，
+// 避免任务已经 blocked，但旧的 running 通知仍让侧栏显示 loading。
+watch(
+  [selectedTaskUuid, () => task.value?.status],
+  ([taskUuid, status]) => conversationStore.setTaskStatus(taskUuid, status),
+  { immediate: true },
 )
 
 const md = new MarkdownIt({ breaks: true, linkify: true })
@@ -931,6 +948,7 @@ function restoreCachedTaskView(taskUuid: string) {
     return false
   }
   task.value = cached.task
+  conversationStore.setTaskStatus(taskUuid, cached.task.status)
   progress.value = cached.progress
   selectedStepUuid.value = resolveSelectedStepUuid(
     cached.task,
@@ -1157,6 +1175,7 @@ async function loadSelectedTask(silent = false) {
       selectedStepUuid.value,
     )
     taskViewCache.set(taskUuid, { task: loadedTask, progress: sortedProgress })
+    conversationStore.setTaskStatus(taskUuid, loadedTask.status)
     task.value = loadedTask
     progress.value = sortedProgress
     selectedStepUuid.value = nextSelectedStepUuid
@@ -1525,10 +1544,24 @@ function handleDocumentKeydown(event: KeyboardEvent) {
   closeContextMenu()
 }
 
-useLocalWS('task.changed', (data: { task_uuid?: string }) => {
+useLocalWS('task.changed', (data: { task_uuid?: string; deleted?: boolean }) => {
   if (isNewConversation.value) return
+  if (data.deleted && data.task_uuid) {
+    const taskUuid = data.task_uuid
+    notificationsLoadVersion += 1
+    notifications.value = notifications.value.filter((item) => item.task_uuid !== taskUuid)
+    temporaryNotifications.value = temporaryNotifications.value.filter((item) => item.task_uuid !== taskUuid)
+    taskViewCache.delete(taskUuid)
+    void removePersistentTaskView(taskUuid)
+    if (selectedTaskUuid.value === taskUuid) {
+      selectedTaskUuid.value = ''
+      clearSelectedTask()
+      void router.replace({ name: 'tasks-new' })
+      void persistViewState()
+    }
+  }
   void loadNotifications(true)
-  if (data.task_uuid === selectedTaskUuid.value) void loadSelectedTask(true)
+  if (!data.deleted && data.task_uuid === selectedTaskUuid.value) void loadSelectedTask(true)
 })
 
 watch(wsConnected, (connected) => {
@@ -2093,12 +2126,7 @@ onBeforeUnmount(() => {
   gap: 4px;
   overflow-y: scroll;
   padding: 8px 24px;
-  scrollbar-color: rgba(140, 149, 168, 0.42) transparent;
   scrollbar-gutter: stable;
-}
-
-.conversation-list::-webkit-scrollbar-thumb {
-  background: rgba(140, 149, 168, 0.35);
 }
 
 .conversation-item {

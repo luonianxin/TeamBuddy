@@ -3,11 +3,16 @@
 package executor
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+// Windows 每次 lookup 都读取注册表，无需单独刷新快照。
+func refreshDiscoveryPath(context.Context) {}
 
 // persistedPathDirs returns the directories persisted in the Windows user and
 // machine PATH (registry). A long-running backend process may have been started
@@ -21,7 +26,7 @@ func persistedPathDirs() []string {
 	appendEntry := func(value string) {
 		expanded := expandEnvStrings(value)
 		for _, dir := range strings.Split(expanded, ";") {
-			if dir = strings.TrimSpace(dir); dir != "" {
+			if dir = strings.Trim(strings.TrimSpace(dir), "\""); filepath.IsAbs(dir) {
 				dirs = append(dirs, dir)
 			}
 		}

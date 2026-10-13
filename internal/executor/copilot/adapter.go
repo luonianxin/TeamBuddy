@@ -45,7 +45,9 @@ func buildInvocation(opts executor.RunOptions, resumeSession string) executor.In
 		"--no-color",
 	}
 	if resumeSession != "" {
-		args = append(args, "--resume", resumeSession)
+		args = append(args, executor.SessionArg(true, "--resume", resumeSession)...)
+	} else if opts.PresetSessionID != "" {
+		args = append(args, executor.SessionArg(true, "--session-id", opts.PresetSessionID)...)
 	}
 	if opts.ModelProfile != "" && opts.ModelProfile != "auto" {
 		args = append(args, "--model", opts.ModelProfile)

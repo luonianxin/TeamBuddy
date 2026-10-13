@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 
 	"goteams-client/internal/protocol"
 )
@@ -115,24 +116,36 @@ func (c *Client) RefreshToken(ctx context.Context, token string) (*LoginResponse
 		return nil, parseAPIError(resp)
 	}
 
-	var result LoginResponse
+	var payload loginPayload
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
-	if err := decodeAPIResponse(resp.StatusCode, respBody, &result); err != nil {
+	if err := decodeAPIResponse(resp.StatusCode, respBody, &payload); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return payload.toLoginResponse("")
 }
 
 // GetMe gets the current user information
 func (c *Client) GetMe(ctx context.Context) (*UserInfo, error) {
-	var result UserInfo
+	var result struct {
+		ID       string `json:"user_id"`
+		Username string `json:"username"`
+		Name     string `json:"name"`
+		Avatar   string `json:"avatar"`
+		Role     int    `json:"role_id"`
+	}
 	if err := c.do(ctx, http.MethodGet, "/api/client/me", nil, &result); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return &UserInfo{
+		ID:          result.ID,
+		Username:    result.Username,
+		DisplayName: result.Name,
+		Avatar:      result.Avatar,
+		Role:        strconv.Itoa(result.Role),
+	}, nil
 }
 
 // RegisterDevice registers the device (using the boot key)

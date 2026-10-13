@@ -90,7 +90,16 @@ const sources = computed(() => iconSources[props.name][props.dark ? 'dark' : 'li
   top: 50%;
   left: 50%;
   max-width: none;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) scale(1.14);
+  transform-origin: center;
+}
+
+.sidebar-menu-icon svg {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 18px;
+  height: 18px;
 }
 
 .task img:last-child {

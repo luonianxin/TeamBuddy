@@ -3,7 +3,6 @@ package cloud
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 
 	"goteams-client/internal/applog"
@@ -44,25 +43,19 @@ type PipelineTaskSessionSync struct {
 	ClientUpdatedAt int64 `json:"client_updated_at"`
 }
 
-// PushPipelineTaskSession pushes the step-level session projection to the cloud.
-// Sync success is defined purely by the HTTP transport result (2xx): the business
-// result inside the response body is intentionally ignored, so any non-2xx status
-// (e.g. 502) is returned as an error carrying the HTTP status code.
+// PushPipelineTaskSession acknowledges only a valid accepted/duplicate response.
+// HTTP 200 with a business error, an empty body, or malformed JSON remains pending.
 func (c *Client) PushPipelineTaskSession(ctx context.Context, payload PipelineTaskSessionSync) error {
-	resp, err := c.doRaw(ctx, http.MethodPost, "/api/client/pipeline-tasks/sessions", payload, nil)
+	var result struct {
+		Result string `json:"result"`
+	}
+	err := c.do(ctx, http.MethodPost, "/api/client/pipeline-tasks/sessions", payload, &result)
 	if err != nil {
 		applog.Error("[CloudSync] 推送步骤会话失败", "云端地址", c.BaseURL(), "task_uuid", payload.LocalTaskUUID, "step_key", payload.StepKey, "error", err.Error())
 		return fmt.Errorf("请求云端失败: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		apiErr := parseAPIError(resp)
-		applog.Error("[CloudSync] 推送步骤会话被云端拒绝",
-			"云端地址", c.BaseURL(), "task_uuid", payload.LocalTaskUUID, "step_key", payload.StepKey,
-			"status_code", resp.StatusCode, "error", apiErr.Error())
-		return apiErr
+	if result.Result != "accepted" && result.Result != "duplicate" {
+		return fmt.Errorf("session upload was not accepted: %s", result.Result)
 	}
-	// Drain the body so the underlying connection can be reused.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 	return nil
 }

@@ -27,7 +27,7 @@ func (h *NotificationsHandler) RegisterRoutes(r *gin.RouterGroup) {
 
 func (h *NotificationsHandler) list(c *gin.Context) {
 	includeArchived := c.Query("include_archived") == "1" || c.Query("include_archived") == "true" || c.Query("all") == "1"
-	query := `SELECT n.uuid, n.task_uuid, t.title, n.task_step_uuid,
+	query := `SELECT n.uuid, n.task_uuid, t.title, t.status, n.task_step_uuid,
 		COALESCE(s.name, ''), n.step_order, n.progress_uuid, n.terminal_status, n.summary, n.is_read, n.is_archived, n.created_at,
 		t.execution_mode, t.execution_tool, COALESCE(t.work_dir, ''), COALESCE(t.project_uuid, '')
 		FROM gt_task_notifications n JOIN gt_tasks t ON t.uuid = n.task_uuid
@@ -45,17 +45,17 @@ func (h *NotificationsHandler) list(c *gin.Context) {
 	defer rows.Close()
 	items := make([]gin.H, 0)
 	for rows.Next() {
-		var id, taskID, taskTitle, stepID, stepName, progressID, status, summary, executionMode, executionTool string
+		var id, taskID, taskTitle, taskStatus, stepID, stepName, progressID, status, summary, executionMode, executionTool string
 		var workDir, projectUUID string
 		var stepOrder int
 		var isRead, isArchived bool
 		var createdAt int64
-		if err := rows.Scan(&id, &taskID, &taskTitle, &stepID, &stepName, &stepOrder, &progressID, &status, &summary, &isRead, &isArchived, &createdAt,
+		if err := rows.Scan(&id, &taskID, &taskTitle, &taskStatus, &stepID, &stepName, &stepOrder, &progressID, &status, &summary, &isRead, &isArchived, &createdAt,
 			&executionMode, &executionTool, &workDir, &projectUUID); err != nil {
 			i18n.LocalServerError(c, http.StatusInternalServerError, err)
 			return
 		}
-		items = append(items, gin.H{"uuid": id, "task_uuid": taskID, "task_title": taskTitle,
+		items = append(items, gin.H{"uuid": id, "task_uuid": taskID, "task_title": taskTitle, "task_status": taskStatus,
 			"task_step_uuid": stepID, "step_name": stepName, "step_sort_order": stepOrder,
 			"progress_uuid": progressID, "status": status, "summary": summary, "is_read": isRead, "is_archived": isArchived, "created_at": createdAt,
 			"execution_mode": executionMode, "execution_tool": executionTool, "work_dir": workDir, "project_uuid": projectUUID})

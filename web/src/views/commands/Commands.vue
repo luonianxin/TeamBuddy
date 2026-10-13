@@ -488,9 +488,6 @@ onMounted(async () => {
 .top-command-copy strong { font-family: Consolas, monospace; font-size: 15px; }
 .top-command-copy small { color: #8a93a5; }
 .result-list { display: flex; flex-direction: column; gap: 14px; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 8px 4px 2px; }
-.result-list::-webkit-scrollbar { width: 8px; }
-.result-list::-webkit-scrollbar-thumb { background: #c9ced6; border-radius: 4px; }
-.result-list::-webkit-scrollbar-thumb:hover { background: #aab2bd; }
 .result-card { flex-shrink: 0; overflow: hidden; background: #fff; border: 1px solid #e4e8f0; border-radius: 10px; }
 .result-card header { display: flex; align-items: center; gap: 10px; padding: 11px 14px; color: #7a8498; border-bottom: 1px solid #edf0f5; font-size: 12px; }
 .result-card header code { flex: 1; color: #25314a; font-size: 13px; }

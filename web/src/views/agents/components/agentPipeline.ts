@@ -7,6 +7,7 @@ export interface DiscoveredCLI {
   type: string
   name: string
   installed: boolean
+  exec_path?: string
   version?: string
   models?: string[]
 }

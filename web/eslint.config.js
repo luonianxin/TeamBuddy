@@ -51,7 +51,7 @@ export default defineConfig([
         'error',
         {
           ignoreText: [
-            'TeamsBoard',
+            'TeamBuddy',
             'Agent',
             'CLI',
             'API',

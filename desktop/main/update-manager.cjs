@@ -218,7 +218,7 @@ class UpdateManager extends EventEmitter {
     }
     const age = this.now() - this.cache.fetchedAt
     if (!force && cachedRelease && age >= 0 && age < CACHE_TTL_MS) return cachedRelease
-    const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'TeamsBoard-Updater',
+    const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'TeamBuddy-Updater',
       'X-GitHub-Api-Version': '2022-11-28' }
     if (this.cache.etag) headers['If-None-Match'] = this.cache.etag
     const response = await this.getResponse(RELEASE_URL, headers)
@@ -332,7 +332,7 @@ class UpdateManager extends EventEmitter {
       await fsp.mkdir(path.dirname(target), { recursive: true })
       await fsp.rm(partial, { force: true })
       if (signal.aborted) throw new Error('下载已取消')
-      const response = await this.getResponse(asset.url, { 'User-Agent': 'TeamsBoard-Updater' }, signal)
+      const response = await this.getResponse(asset.url, { 'User-Agent': 'TeamBuddy-Updater' }, signal)
       if (response.statusCode !== 200) {
         response.resume()
         throw new Error(`下载安装包失败：HTTP ${response.statusCode}`)

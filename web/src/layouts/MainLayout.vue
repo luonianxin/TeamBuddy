@@ -5,6 +5,7 @@ import { notification } from 'ant-design-vue'
 import apiClient from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { useConversationStore } from '@/stores/conversation'
+import { removeDeletedTaskFromCache } from '@/utils/taskConversationCache'
 import {
   isDesktopRuntime,
   isMacDesktopRuntime,
@@ -74,7 +75,10 @@ useLocalWS('app.notifications.unread', (data: { count: number }) => {
   void syncTaskNotifications(previousCount, nextCount)
 })
 
-useLocalWS('task.changed', () => {
+useLocalWS('task.changed', (data: { task_uuid?: string; deleted?: boolean }) => {
+  if (data.deleted && data.task_uuid) {
+    void removeDeletedTaskFromCache(data.task_uuid).catch(() => {})
+  }
   void conversationStore.loadConversations(true)
 })
 
@@ -212,7 +216,7 @@ onUnmounted(() => {
   <div class="app-layout" :class="{ 'mac-desktop': isMacDesktop, 'windows-desktop': isWindowsDesktop }">
     <AppSidebar />
     <div class="main-wrapper">
-      <!-- Windows 标题栏盖住内容区，侧栏收起时展开条本身就是这一行；展开时主区域另留等高拖动条。macOS 窗口按钮在左侧，不留这道空白。 -->
+      <!-- 桌面标题栏盖住内容区：侧栏收起时展开条本身就是拖动区；展开时主区域另留等高拖动条。 -->
       <div
         v-if="appStore.sidebarCollapsed"
         class="collapsed-bar"
@@ -230,8 +234,12 @@ onUnmounted(() => {
             class="expand-icon"
           />
         </button>
-        <span class="collapsed-title">TeamsBoard</span>
+        <span class="collapsed-title">TeamBuddy</span>
       </div>
+      <div
+        v-else-if="isMacDesktop"
+        class="mac-titlebar-spacer"
+      />
       <div
         v-else-if="isWindowsDesktop"
         class="windows-titlebar-spacer"
@@ -295,15 +303,25 @@ onUnmounted(() => {
 
 .windows-desktop .collapsed-bar {
   -webkit-app-region: drag;
+  height: env(titlebar-area-height, 32px);
   padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
-  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9f9f9;
+}
+
+.mac-titlebar-spacer {
+  height: 38px;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+  background: #f9f9f9;
 }
 
 .windows-titlebar-spacer {
-  height: env(titlebar-area-height, 38px);
+  height: env(titlebar-area-height, 32px);
   flex-shrink: 0;
   -webkit-app-region: drag;
-  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9f9f9;
 }
 
 .sidebar-expand-btn {

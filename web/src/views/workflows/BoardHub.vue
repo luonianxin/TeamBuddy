@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { AppstoreOutlined, PlusOutlined, UnorderedListOutlined } from '@ant-design/icons-vue'
+import { computed, ref, watch } from 'vue'
+import { AppstoreOutlined, PlusOutlined, SearchOutlined, UnorderedListOutlined } from '@ant-design/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import TaskBoard from './components/TaskBoard.vue'
 import TeamBoard from './components/TeamBoard.vue'
@@ -14,45 +14,100 @@ import type { BoardLayoutMode } from '@/types/task-board'
 const { t } = useAppI18n()
 
 type BoardTab = 'local' | 'team'
-const LAYOUT_STORAGE_KEYS: Record<BoardTab, string> = {
+const BOARD_TAB_STORAGE_KEY = 'goteams.workflows.board-tab'
+const LEGACY_LAYOUT_KEYS: Record<BoardTab, string> = {
   local: 'goteams.workflows.local-board-layout',
   team: 'goteams.workflows.team-board-layout',
-}
-
-function readLayoutMode(tab: BoardTab): BoardLayoutMode {
-  if (typeof window === 'undefined') return 'board'
-  try {
-    return window.localStorage.getItem(LAYOUT_STORAGE_KEYS[tab]) === 'list' ? 'list' : 'board'
-  } catch {
-    return 'board'
-  }
 }
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const preferenceKey = computed(() => {
+  const user = authStore.cloudUser
+  const scope = authStore.cloudLoggedIn && user
+    ? user.accountScope || `legacy:${user.id}:${user.username}`
+    : 'local'
+  return `goteams.workflows.board.v1:${encodeURIComponent(scope)}`
+})
+
+function readPreferences() {
+  const defaults = {
+    tab: 'local' as BoardTab,
+    local: 'board' as BoardLayoutMode,
+    team: 'board' as BoardLayoutMode,
+    localStatus: 'active',
+    teamStatus: 'active',
+  }
+  try {
+    const raw = window.localStorage.getItem(preferenceKey.value)
+    if (!raw) {
+      // 只迁移旧版有限枚举偏好，后续按账号独立保存。
+      defaults.tab = window.localStorage.getItem(BOARD_TAB_STORAGE_KEY) === 'team' ? 'team' : 'local'
+      defaults.local = window.localStorage.getItem(LEGACY_LAYOUT_KEYS.local) === 'list' ? 'list' : 'board'
+      defaults.team = window.localStorage.getItem(LEGACY_LAYOUT_KEYS.team) === 'list' ? 'list' : 'board'
+      return defaults
+    }
+    const saved: Record<string, unknown> = JSON.parse(raw)
+    return {
+      tab: saved.tab === 'team' ? 'team' as const : 'local' as const,
+      local: saved.local === 'list' ? 'list' as const : 'board' as const,
+      team: saved.team === 'list' ? 'list' as const : 'board' as const,
+      localStatus: typeof saved.localStatus === 'string' && saved.localStatus ? saved.localStatus : 'active',
+      teamStatus: typeof saved.teamStatus === 'string' && saved.teamStatus ? saved.teamStatus : 'active',
+    }
+  } catch {
+    return defaults
+  }
+}
+
+const preferences = ref(readPreferences())
+function savePreferences() {
+  try {
+    window.localStorage.setItem(preferenceKey.value, JSON.stringify(preferences.value))
+  } catch {
+    // 禁用或已满的存储不阻止本次页面操作。
+  }
+}
+watch(preferenceKey, (_key, previousKey) => {
+  preferences.value = readPreferences()
+  if (previousKey !== 'goteams.workflows.board.v1:local' && route.query.tab !== undefined) {
+    const query = { ...route.query }
+    delete query.tab
+    void router.replace({ query })
+  }
+})
 const activeTab = computed<BoardTab>({
-  get: () => (route.query.tab === 'team' ? 'team' : 'local'),
+  get: () => {
+    // 显式深链优先，只有主动切换才改变下次进入时的默认偏好。
+    const tab = Array.isArray(route.query.tab) ? route.query.tab[0] : route.query.tab
+    if (tab === 'team' || tab === 'local') return tab
+    return authStore.cloudLoggedIn ? preferences.value.tab : 'local'
+  },
   set: (val) => {
-    void router.replace({ query: val === 'team' ? { tab: 'team' } : {} })
+    preferences.value.tab = val
+    savePreferences()
+    void router.replace({ query: { ...route.query, tab: val } })
   },
 })
-const layoutModes = ref<Record<BoardTab, BoardLayoutMode>>({
-  local: readLayoutMode('local'),
-  team: readLayoutMode('team'),
+const searchKeywords = ref<Record<BoardTab, string>>({ local: '', team: '' })
+const activeSearchKeyword = computed({
+  get: () => searchKeywords.value[activeTab.value],
+  set: (value: string) => {
+    searchKeywords.value[activeTab.value] = value
+  },
 })
 const activeLayoutMode = computed<BoardLayoutMode>({
-  get: () => layoutModes.value[activeTab.value],
+  get: () => preferences.value[activeTab.value],
   set: (mode) => {
-    const tab = activeTab.value
-    layoutModes.value[tab] = mode
-    try {
-      window.localStorage.setItem(LAYOUT_STORAGE_KEYS[tab], mode)
-    } catch {
-      // 本地存储不可用时，仍保留本次页面内的视图选择。
-    }
+    preferences.value[activeTab.value] = mode
+    savePreferences()
   },
 })
+function setStatusFilter(tab: BoardTab, status: string) {
+  preferences.value[tab === 'local' ? 'localStatus' : 'teamStatus'] = status
+  savePreferences()
+}
 
 function setLayoutMode(mode: BoardLayoutMode) {
   activeLayoutMode.value = mode
@@ -81,6 +136,16 @@ const showLoginGuide = computed(() => activeTab.value === 'team' && !authStore.c
           ><img :src="teamViewIcon" alt="" />{{ t('workflows.board.teamWork') }}</button>
         </nav>
         <div class="board-action-end">
+          <a-input
+            v-if="!showLoginGuide"
+            v-model:value="activeSearchKeyword"
+            class="task-search"
+            :placeholder="t('workflows.board.searchTasks')"
+            :aria-label="t('workflows.board.searchTasks')"
+            allow-clear
+          >
+            <template #prefix><SearchOutlined aria-hidden="true" /></template>
+          </a-input>
           <nav class="layout-switch" :aria-label="t('workflows.board.layoutSwitch')">
             <a-tooltip :title="t('workflows.board.boardView')">
               <button
@@ -113,11 +178,25 @@ const showLoginGuide = computed(() => activeTab.value === 'team' && !authStore.c
       class="board-content"
       :class="{ 'team-login-content': showLoginGuide }"
     >
-      <TaskBoard v-if="activeTab === 'local'" ref="boardRef" :view-mode="activeLayoutMode" />
+      <TaskBoard
+        v-if="activeTab === 'local'"
+        ref="boardRef"
+        :status-filter="preferences.localStatus"
+        :view-mode="activeLayoutMode"
+        :search-keyword="activeSearchKeyword"
+        @update:status-filter="setStatusFilter('local', $event)"
+      />
       <template v-else-if="showLoginGuide">
         <TeamWorkLoginCard @use-local="activeTab = 'local'" />
       </template>
-      <TeamBoard v-else :view-mode="activeLayoutMode" />
+      <TeamBoard
+        v-else
+        :key="preferenceKey"
+        :status-filter="preferences.teamStatus"
+        :view-mode="activeLayoutMode"
+        :search-keyword="activeSearchKeyword"
+        @update:status-filter="setStatusFilter('team', $event)"
+      />
     </main>
   </div>
 </template>
@@ -137,6 +216,7 @@ const showLoginGuide = computed(() => activeTab.value === 'team' && !authStore.c
 .layout-switch button.active { color: #262626; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.08); font-weight: 600; }
 .board-source-switch button.active img[src$="team-view.svg"] { filter: brightness(.43); opacity: 1; }
 .board-action-end { display: flex; align-items: center; gap: 10px; }
+.task-search { width: 240px; border-radius: 12px; }
 .layout-switch button { display: inline-flex; width: 30px; height: 30px; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 50%; color: #595959; background: transparent; cursor: pointer; font-size: 16px; }
 .board-source-switch button:focus-visible,
 .layout-switch button:focus-visible { outline: 2px solid #3157e2; outline-offset: 2px; }
@@ -147,5 +227,11 @@ const showLoginGuide = computed(() => activeTab.value === 'team' && !authStore.c
    因此底部留白比顶部多 96px，卡片位置才与设计稿一致。 */
 .team-login-content { display: flex; overflow-y: auto; padding: 24px 24px 120px; }
 .team-login-content > * { margin: auto; }
+@media (max-width: 900px) {
+  .board-tabs { height: auto; flex-basis: auto; }
+  .board-actions { height: auto; min-height: 52px; flex-wrap: wrap; gap: 12px; padding: 10px 0; }
+  .board-action-end { min-width: 0; flex-wrap: wrap; }
+  .task-search { width: 200px; max-width: 100%; }
+}
 @media (max-width: 640px) { .board-tabs { padding: 0 16px; } .board-heading { margin: 0 -16px; padding: 0 16px; } .board-content:not(.team-login-content) { padding: 0 16px 16px; } .team-login-content { padding: 16px 16px 112px; } }
 </style>

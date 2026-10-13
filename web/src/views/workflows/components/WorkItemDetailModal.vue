@@ -25,11 +25,44 @@
         </header>
 
         <a-spin :spinning="loading">
-          <div class="work-item-body">
+          <div
+            class="work-item-body"
+            :class="{ 'aside-collapsed': collapsed }"
+          >
             <div class="work-item-main scrollbar--subtle">
               <div class="work-item-heading">
-                <h2 class="work-item-title">{{ detail?.title || item?.title }}</h2>
-                <div class="work-item-description">
+                <h2 class="work-item-title">
+                  <span class="work-item-title-text">{{ detail?.title || item?.title }}</span>
+                  <a
+                    v-if="workItemURL"
+                    class="work-item-external-link"
+                    :href="workItemURL"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    :aria-label="t('teamwork.workItem.openInBrowser')"
+                    :title="t('teamwork.workItem.openInBrowser')"
+                  >
+                    <ExportOutlined aria-hidden="true" />
+                  </a>
+                  <button
+                    type="button"
+                    class="work-item-aside-toggle"
+                    :aria-label="collapsed ? t('teamwork.workItem.expand') : t('teamwork.workItem.collapse')"
+                    :aria-expanded="!collapsed"
+                    @click="collapsed = !collapsed"
+                  >
+                    <img
+                      :src="directoryToggleIcon"
+                      alt=""
+                      aria-hidden="true"
+                      class="work-item-aside-toggle-icon"
+                    />
+                  </button>
+                </h2>
+                <div
+                  class="work-item-description"
+                  @click="handleRichTextClick"
+                >
                   <div
                     v-if="descriptionHTML"
                     class="rich-text"
@@ -154,6 +187,7 @@
                         v-if="comment.html"
                         class="comment-content rich-text"
                         v-html="comment.html"
+                        @click="handleRichTextClick"
                       />
                       <p
                         v-else
@@ -176,6 +210,7 @@
             <aside class="work-item-aside">
               <div class="aside-header">
                 <nav
+                  v-show="!collapsed"
                   class="aside-tabs"
                   :aria-label="t('teamwork.workItem.title')"
                 >
@@ -190,13 +225,6 @@
                     {{ tab.label }}
                   </button>
                 </nav>
-                <button
-                  type="button"
-                  class="aside-collapse"
-                  @click="collapsed = !collapsed"
-                >
-                  {{ collapsed ? t('teamwork.workItem.expand') : t('teamwork.workItem.collapse') }}
-                </button>
               </div>
 
               <!-- 属性：设计稿 3205:37823 的卡片式信息表，标签在左、值在右。 -->
@@ -273,6 +301,11 @@
             </aside>
           </div>
         </a-spin>
+
+        <TaskImagePreviewModal
+          v-model:open="previewImageVisible"
+          :image-url="previewImageUrl"
+        />
       </section>
     </div>
   </Teleport>
@@ -287,16 +320,19 @@ import {
   CheckSquareOutlined,
   CloseOutlined,
   CommentOutlined,
+  ExportOutlined,
   FolderOutlined,
   PaperClipOutlined,
   ProjectOutlined,
   ShareAltOutlined,
 } from '@ant-design/icons-vue'
 import apiClient from '@/api/client'
+import directoryToggleIcon from '@/assets/icons/knowledge-directory-toggle.svg'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import { useAppI18n } from '@/i18n'
 import { useLocale } from '@/composables/useLocale'
 import type { MyWorkItem } from '@/types/workitem'
+import TaskImagePreviewModal from './TaskImagePreviewModal.vue'
 
 const { t } = useAppI18n()
 const { locale } = useLocale()
@@ -331,6 +367,10 @@ interface WorkItemDetailPayload {
   comments?: Array<Record<string, unknown>>
   attachments?: Array<Record<string, unknown>>
   custom_fields?: CustomFieldDefinition[]
+}
+
+interface CloudConfigPayload {
+  api_base_url?: string
 }
 
 interface CustomFieldOption {
@@ -387,10 +427,13 @@ const activeTab = ref<DetailTab>('attributes')
 const collapsed = ref(false)
 const loading = ref(false)
 const detail = ref<Record<string, unknown>>()
+const cloudBaseURL = ref('')
 const customFieldDefs = ref<CustomFieldDefinition[]>([])
 const localTask = ref<LocalTaskDetail>()
 const comments = ref<CommentRow[]>([])
 const attachments = ref<AttachmentRow[]>([])
+const previewImageVisible = ref(false)
+const previewImageUrl = ref('')
 
 const hasLocalTask = computed(() => Boolean(props.item?.local_task_uuid))
 
@@ -411,10 +454,13 @@ watch(
     activeTab.value = 'attributes'
     collapsed.value = false
     detail.value = undefined
+    cloudBaseURL.value = ''
     customFieldDefs.value = []
     localTask.value = undefined
     comments.value = []
     attachments.value = []
+    previewImageVisible.value = false
+    previewImageUrl.value = ''
     if (!props.open || !props.item) return
 
     loading.value = true
@@ -439,6 +485,14 @@ watch(
                 detail.value = props.item as unknown as Record<string, unknown>
               })
           : Promise.resolve(),
+        apiClient
+          .get<CloudConfigPayload>('/config/cloud')
+          .then((config) => {
+            cloudBaseURL.value = config.api_base_url?.trim() || ''
+          })
+          .catch(() => {
+            // 云端地址只影响外部跳转，详情本身仍可正常查看。
+          }),
       ]
       if (taskUuid) {
         requests.push(
@@ -464,6 +518,32 @@ const descriptionText = computed(
   () => readString(detail.value?.description) || readString(props.item?.description),
 )
 const descriptionHTML = computed(() => (isHTML(descriptionText.value) ? descriptionText.value : ''))
+
+const workItemURL = computed(() => {
+  const workspaceId = Number(detail.value?.workspace_id ?? props.item?.workspace_id)
+  const workItemId = Number(detail.value?.id ?? props.item?.id)
+  if (!Number.isSafeInteger(workspaceId) || workspaceId <= 0) return ''
+  if (!Number.isSafeInteger(workItemId) || workItemId <= 0) return ''
+
+  try {
+    const baseURL = new URL(cloudBaseURL.value)
+    if (baseURL.protocol !== 'https:' && baseURL.protocol !== 'http:') return ''
+    if (baseURL.username || baseURL.password) return ''
+    return new URL(`/workspace/${workspaceId}/work-items/${workItemId}`, baseURL).toString()
+  } catch {
+    return ''
+  }
+})
+
+function handleRichTextClick(event: MouseEvent) {
+  const target = event.target
+  if (!(target instanceof HTMLImageElement)) return
+  const imageURL = target.currentSrc || target.src
+  if (!imageURL) return
+  event.preventDefault()
+  previewImageUrl.value = imageURL
+  previewImageVisible.value = true
+}
 
 /** 设计稿 3205:37823 的属性行：父需求、状态、优先级、迭代、处理人、预计起止、自定义字段、创建信息。 */
 const attributeRows = computed<AttributeRow[]>(() => {
@@ -797,12 +877,12 @@ function formatDateTime(value?: unknown) {
   flex: 1;
 }
 
-/* 左列固定 600，右栏固定 322（922 = 600 + 322）。 */
+/* 展开时左列为 600、右栏为 322；右栏收起后左列自动占满剩余空间。 */
 .work-item-main {
   display: flex;
-  width: 600px;
-  min-width: 600px;
+  min-width: 0;
   box-sizing: border-box;
+  flex: 1;
   flex-direction: column;
   gap: 24px;
   padding: 24px;
@@ -816,6 +896,9 @@ function formatDateTime(value?: unknown) {
 }
 
 .work-item-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   margin: 0;
   padding-bottom: 8px;
   border-bottom: 1px solid #f0f0f0;
@@ -824,6 +907,68 @@ function formatDateTime(value?: unknown) {
   font-weight: 600;
   line-height: 32px;
   word-break: break-word;
+}
+
+.work-item-title-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.work-item-external-link {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  border-radius: 6px;
+  color: #8c8c8c;
+  font-size: 16px;
+}
+
+.work-item-external-link:hover {
+  color: #3157e2;
+  background: #eef2ff;
+}
+
+.work-item-external-link:focus-visible {
+  outline: 2px solid #3157e2;
+  outline-offset: 2px;
+}
+
+.work-item-aside-toggle {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: #5f6368;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.work-item-aside-toggle:hover {
+  color: #3157e2;
+  background: #f0f1f3;
+}
+
+.work-item-aside-toggle:focus-visible {
+  outline: 2px solid #3157e2;
+  outline-offset: 2px;
+}
+
+.work-item-aside-toggle-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  transform: rotate(180deg);
 }
 
 .work-item-description {
@@ -849,6 +994,11 @@ function formatDateTime(value?: unknown) {
 
 .rich-text :deep(img) {
   max-width: 100%;
+}
+
+.work-item-description :deep(img),
+.comment-content.rich-text :deep(img) {
+  cursor: zoom-in;
 }
 
 .work-item-section {
@@ -1017,9 +1167,20 @@ function formatDateTime(value?: unknown) {
   display: flex;
   width: 322px;
   min-width: 322px;
+  box-sizing: border-box;
   flex-direction: column;
   border-left: 1px solid #f0f0f0;
   background: #fff;
+  transition:
+    width 200ms ease,
+    min-width 200ms ease;
+}
+
+.work-item-body.aside-collapsed .work-item-aside {
+  width: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-left: 0;
 }
 
 .aside-header {
@@ -1051,25 +1212,9 @@ function formatDateTime(value?: unknown) {
   font-weight: 600;
 }
 
-.aside-tabs button:focus-visible,
-.aside-collapse:focus-visible {
+.aside-tabs button:focus-visible {
   outline: 2px solid #3157e2;
   outline-offset: 2px;
-}
-
-.aside-collapse {
-  display: inline-flex;
-  height: 26px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 6px;
-  color: #595959;
-  background: #f2f4f7;
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 15px;
 }
 
 /* 设计稿 3205:37823：单张信息卡，行高 35，标签左、值右。 */
@@ -1263,9 +1408,23 @@ function formatDateTime(value?: unknown) {
     min-width: 0;
   }
 
+  .work-item-body.aside-collapsed .work-item-aside {
+    width: 0;
+    min-width: 0;
+    height: 0;
+    overflow: hidden;
+    border: 0;
+  }
+
   .work-item-aside {
     border-top: 1px solid #f0f0f0;
     border-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-item-aside {
+    transition: none;
   }
 }
 </style>

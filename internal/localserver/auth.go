@@ -313,6 +313,8 @@ func (s *Server) completeCloudLogin(
 	serverType, serverURL string,
 	loginResp *cloud.LoginResponse,
 ) (bool, error) {
+	s.authTransitionMu.Lock()
+	defer s.authTransitionMu.Unlock()
 	// 本地 Profile 与凭据文件始终是应用级的，不随账号或云端地址拆分。
 	profileDir := s.config.BaseProfileDir
 	if profileDir == "" {
@@ -339,6 +341,7 @@ func (s *Server) completeCloudLogin(
 		loginResp.AdminID,
 		loginResp.User.ID,
 		loginResp.User.Username,
+		loginResp.User.DisplayName,
 		loginResp.Token,
 		opts,
 	)
@@ -422,6 +425,8 @@ func (s *Server) completeCloudLogin(
 
 // handleLogout log out
 func (s *Server) handleLogout(c *gin.Context) {
+	s.authTransitionMu.Lock()
+	defer s.authTransitionMu.Unlock()
 	//Clear browser session
 	sessionID, err := c.Cookie("goteams_local_session")
 	if err == nil && sessionID != "" {
@@ -471,6 +476,10 @@ func (s *Server) handleSessionStatus(c *gin.Context) {
 		cur = nil
 	}
 	cloudLoggedIn := cur != nil
+	accountScope := ""
+	if cur != nil && cur.CloudClient != nil {
+		accountScope = ServerProfileKey(cur.CloudClient.BaseURL()) + ":" + cur.AdminID + ":" + cur.UserID
+	}
 	var user interface{}
 	if cloudLoggedIn {
 		// 浏览器 session 档案更完整（头像、角色等）；缺失时回退账号会话，
@@ -489,6 +498,9 @@ func (s *Server) handleSessionStatus(c *gin.Context) {
 		}
 		if userName == "" {
 			userName = cur.UserName
+		}
+		if displayName == "" {
+			displayName = cur.DisplayName
 		}
 		if displayName == "" {
 			displayName = userName
@@ -512,6 +524,7 @@ func (s *Server) handleSessionStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"local_authenticated": true,
 		"cloud_logged_in":     cloudLoggedIn,
+		"account_scope":       accountScope,
 		"user":                user,
 		// 无 Electron 注入（纯 Go 运行/浏览器直连 dev）时，前端需要从本接口
 		// 获取本次启动的 API token 用于后续请求；Electron 模式经 bridge 提供，不返回。
@@ -561,12 +574,13 @@ func (s *Server) validateSession() gin.HandlerFunc {
 			c.Set("session", session)
 		} else if cur := s.currentSession(); s.sessionMatchesConfig(cur) {
 			c.Set("session", &browserSession{
-				ID:        "account",
-				UserID:    cur.UserID,
-				UserName:  cur.UserName,
-				AdminID:   cur.AdminID,
-				CreatedAt: time.Now(),
-				ExpiresAt: time.Now().Add(sessionValidity),
+				ID:          "account",
+				UserID:      cur.UserID,
+				UserName:    cur.UserName,
+				DisplayName: cur.DisplayName,
+				AdminID:     cur.AdminID,
+				CreatedAt:   time.Now(),
+				ExpiresAt:   time.Now().Add(sessionValidity),
 			})
 		}
 		c.Next()
@@ -595,6 +609,8 @@ func isLoopbackRequest(remoteAddr string) bool {
 //
 // The cloud validity verification and renewal of JWT are completed internally by Login.
 func (s *Server) RestoreSession(ctx context.Context) {
+	s.authTransitionMu.Lock()
+	defer s.authTransitionMu.Unlock()
 	if s.config.AccountMgr == nil || s.config.BootstrapStore == nil {
 		return
 	}
@@ -672,7 +688,7 @@ func (s *Server) RestoreSession(ctx context.Context) {
 		applog.Warn("恢复登录态失败：切换 Profile 失败", "error", err)
 		return
 	}
-	sessionInfo, err := s.config.AccountMgr.LoginAndCreateSession(ctx, last.AdminID, last.UserID, last.UserName, "", opts)
+	sessionInfo, err := s.config.AccountMgr.LoginAndCreateSession(ctx, last.AdminID, last.UserID, last.UserName, last.DisplayName, "", opts)
 	if err != nil {
 		applog.Warn("恢复登录态失败", "error", err)
 		// legacy 索引（旧版本写入、无 ServerURL）没有 per-address key 可被
@@ -702,6 +718,7 @@ func (s *Server) RestoreSession(ctx context.Context) {
 			}
 			if user.DisplayName != "" {
 				s.lastLogin.DisplayName = user.DisplayName
+				sessionInfo.DisplayName = user.DisplayName
 			}
 			if user.Avatar != "" {
 				s.lastLogin.Avatar = user.Avatar

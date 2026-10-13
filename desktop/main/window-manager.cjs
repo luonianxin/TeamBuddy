@@ -27,9 +27,9 @@ function createMainWindow({ baseURL, browserTicket, rendererURL }) {
         ? {
             titleBarStyle: 'hidden',
             titleBarOverlay: {
-              color: '#ffffff',
+              color: '#f9f9f9',
               symbolColor: '#1d1d1f',
-              height: 38,
+              height: 32,
             },
           }
         : {}),

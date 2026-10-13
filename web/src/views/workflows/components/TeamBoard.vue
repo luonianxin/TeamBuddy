@@ -47,7 +47,7 @@
                 class="empty-icon"
                 aria-hidden="true"
               />
-              <span class="empty-text">{{ t('common.states.noData') }}</span>
+              <span class="empty-text">{{ props.searchKeyword.trim() ? t('workflows.board.noMatchingTasks') : t('common.states.noData') }}</span>
             </div>
           </div>
         </section>
@@ -56,8 +56,10 @@
 
     <TaskListView
       v-else
+      v-model:status-filter="statusFilter"
       :rows="listRows"
       :filters="listFilters"
+      :search-keyword="props.searchKeyword"
       :loading="loading"
       row-clickable
       @action="handleListAction"
@@ -78,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import apiClient, { ApiError } from '@/api/client'
@@ -106,10 +108,13 @@ import TeamWorkItemCard from './TeamWorkItemCard.vue'
 import WorkItemDetailModal from './WorkItemDetailModal.vue'
 
 const { t } = useAppI18n()
+const statusFilter = defineModel<string>('statusFilter', { default: 'active' })
 const props = withDefaults(defineProps<{
   viewMode?: BoardLayoutMode
+  searchKeyword?: string
 }>(), {
   viewMode: 'board',
+  searchKeyword: '',
 })
 const router = useRouter()
 const authStore = useAuthStore()
@@ -162,8 +167,11 @@ const grouped = computed<Record<string, TeamLaneCard[]>>(() => {
     lanes.value.map((lane) => [lane.key, [] as TeamLaneCard[]]),
   )
   const taskByUuid = new Map(tasks.value.map((task) => [task.uuid, task]))
+  const keyword = props.searchKeyword.trim().toLowerCase()
 
   for (const item of items.value) {
+    const task = item.local_task_uuid ? taskByUuid.get(item.local_task_uuid) : undefined
+    if (keyword && !(task?.title || item.title).toLowerCase().includes(keyword)) continue
     // 待配置只放「我的待办」且还没绑定本地任务的需求/缺陷；已完成但未绑定的工作项不应出现。
     let desired = UNCONFIGURED_LANE_KEY
     if (item.local_task_uuid) {
@@ -176,7 +184,7 @@ const grouped = computed<Record<string, TeamLaneCard[]>>(() => {
     buckets[key].push({
       key: `${item.type}:${item.id}`,
       item,
-      task: item.local_task_uuid ? taskByUuid.get(item.local_task_uuid) : undefined,
+      task,
     })
   }
   return buckets
@@ -227,9 +235,33 @@ const listRows = computed<BoardListRow[]>(() => lanes.value.flatMap((lane) => (
 
 onMounted(load)
 
+let active = true
+let activatedOnce = false
+let loadVersion = 0
+onActivated(() => {
+  active = true
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  void load()
+})
+
+function deactivate() {
+  active = false
+  loadVersion += 1
+  loading.value = false
+  detailOpen.value = false
+  detailItem.value = undefined
+  configureOpen.value = false
+  configureItem.value = undefined
+}
+onDeactivated(deactivate)
+onUnmounted(deactivate)
+
 let refreshQueued = false
 useLocalWS('task.changed', () => {
-  if (refreshQueued) return
+  if (!active || refreshQueued) return
   refreshQueued = true
   queueMicrotask(() => {
     refreshQueued = false
@@ -238,27 +270,50 @@ useLocalWS('task.changed', () => {
 })
 
 async function load() {
+  if (!active) return
+  const version = ++loadVersion
   loading.value = true
-  const [workResult, taskResult] = await Promise.allSettled([
-    apiClient.get<{ items: MyWorkItem[] }>('/team/my-work'),
-    apiClient.get<{ items: TaskBoardTask[] }>('/tasks', { page_size: 100 }),
-  ])
-  if (workResult.status === 'fulfilled') {
-    items.value = workResult.value.items || []
-  } else {
-    if (workResult.reason instanceof ApiError && workResult.reason.status === 401) {
+  try {
+    const response = await apiClient.get<{ items: MyWorkItem[] }>('/team/my-work')
+    if (!active || version !== loadVersion) return
+    const workItems = response.items || []
+    const taskUuids = [...new Set(workItems.map((item) => item.local_task_uuid).filter((value): value is string => Boolean(value)))]
+    const boundTasks: TaskBoardTask[] = []
+    try {
+      // 只加载当前账号工作项绑定的任务；每批不超过接口分页上限。
+      for (let index = 0; index < taskUuids.length; index += 100) {
+        const batch = await apiClient.get<{ items: TaskBoardTask[] }>('/tasks', {
+          uuids: taskUuids.slice(index, index + 100).join(','),
+          page_size: 100,
+        })
+        if (!active || version !== loadVersion) return
+        boundTasks.push(...batch.items)
+      }
+      tasks.value = boundTasks
+    } catch (error) {
+      if (!active || version !== loadVersion) return
+      // 补齐失败时只保留当前工作项仍引用的缓存，不让上一账号的数据进入展示。
+      const currentUuids = new Set(taskUuids)
+      tasks.value = tasks.value.filter((task) => currentUuids.has(task.uuid))
+      message.error(error instanceof Error ? error.message : t('teamwork.board.loadFailed'))
+    }
+    if (!active || version !== loadVersion) return
+    items.value = workItems
+  } catch (error) {
+    if (!active || version !== loadVersion) return
+    if (error instanceof ApiError && error.status === 401) {
       authStore.clearCloudAuth()
       appStore.setCloudStatus('auth-expired')
     } else {
       message.error(
-        workResult.reason instanceof Error
-          ? workResult.reason.message
+        error instanceof Error
+          ? error.message
           : t('teamwork.board.loadFailed'),
       )
     }
+  } finally {
+    if (version === loadVersion) loading.value = false
   }
-  tasks.value = taskResult.status === 'fulfilled' ? taskResult.value.items || [] : []
-  loading.value = false
 }
 
 function openTask(taskUuid: string) {

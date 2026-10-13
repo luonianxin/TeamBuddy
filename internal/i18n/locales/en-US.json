@@ -251,6 +251,27 @@
   "auth_ticket_required": {
     "other": "ticket parameter is required"
   },
+  "cli_resume_interrupted": {
+    "description": "Shown when one automatic resume still does not finish the turn",
+    "other": "The connection dropped before this turn finished. Send another message to continue the same session."
+  },
+  "cli_resume_no_session": {
+    "description": "The process exited before a session id was available",
+    "other": "This turn disconnected before a session id was available, so it cannot continue automatically."
+  },
+  "cli_resume_orphan": {
+    "other": "Leftover processes could not be cleaned up"
+  },
+  "cli_resume_prompt": {
+    "description": "Prompt sent to the CLI on automatic resume. Tools is a plain-text list of unfinished tool calls",
+    "other": "The connection dropped. This is an automatic continuation of the same turn.\nThese tool calls had not returned when the process stopped. They may be partial or already finished:\n{{.Tools}}\nThose processes have been terminated and will not keep running.\nCheck their real result first (files, git status, whether a process is still running). Do not rerun commands with external side effects (delete, migrate, publish, push, install) until you have checked. Then continue the unfinished work in this session. Do not repeat edits that already landed."
+  },
+  "cli_user_stopped": {
+    "other": "Stopped by the user"
+  },
+  "cli_watchdog_stalled": {
+    "other": "The CLI had no activity for a long time (no CPU/IO in the process tree and no output), so it was stopped"
+  },
   "command_docker_command_not_allowed": {
     "other": "Docker subcommand is not allowed"
   },
@@ -737,14 +758,33 @@
     "other": "The built-in teamsboard Skill could not be installed. Codex features are unavailable; restart the app or check the logs."
   },
   "localserver_codex_skill_not_managed": {
-    "other": "A teamsboard Skill with the same name is not managed by TeamsBoard. Codex features are disabled to avoid overwriting it."
+    "other": "A teamsboard Skill with the same name is not managed by TeamBuddy. Codex features are disabled to avoid overwriting it."
+  },
+  "localserver_json_utf8_required": {
+    "other": "The request body must be valid UTF-8 JSON"
+  },
+  "localserver_skill_event_conflict": {
+    "other": "An activity ID cannot be reused for different content"
+  },
+  "localserver_skill_event_id_invalid": {
+    "other": "The activity ID must be a valid UUID"
+  },
+  "localserver_task_cleanup_failed": {
+    "other": "The task was deleted, but its dedicated directory could not be cleaned up. Please check for remaining files manually."
+  },
+  "localserver_task_title_invalid": {
+    "other": "Enter a single-line task name with 1–200 characters"
   },
   "localserver_vibe_cli_not_found": {
     "other": "The CLI was not found. Install it and add it to PATH."
   },
   "localserver_codex_task_prompt": {
-    "description": "SkillPath, TaskUUID and Tool identify the managed TeamsBoard task.",
-    "other": "[$teamsboard]({{.SkillPath}})\n\nUse the teamsboard Skill to handle the following local TeamsBoard task.\nTask UUID: {{.TaskUUID}}\nTool: {{.Tool}}\nThe binding request type must equal the tool. For Codex, read thread_id only from the CODEX_THREAD_ID environment variable (on Windows, $env:CODEX_THREAD_ID). That value is supplied by the current session. Do not guess or scan old sessions. When it is empty, skip binding, still report the final reply, and omit thread_id. Claude Code, CodeBuddy and Qoder use the current session ID; Pi uses the session ID shown by /session.\nKeep this conversation bound to the task and follow the Skill's per-turn sync rules until the conversation ends."
+    "description": "SkillPath, TaskUUID, Tool and ExecutionIndex identify the managed TeamBuddy task execution.",
+    "other": "Use the current tool's native Skill loading mechanism with [$teamsboard]({{.SkillPath}}) to handle the TeamBuddy local task.\n\nTask UUID: {{.TaskUUID}}\n\nTool: {{.Tool}}\n\nExecution generation (execution_index): {{.ExecutionIndex}}\n\nFirst verify that the task's execution generation matches the value above, then read the task and its history, then follow the Skill instructions to obtain and bind the current real session ID. If no ID can be obtained, pause reporting and prompt to upgrade the tool or rebind. The binding request type must equal the tool. For Codex, thread_id is read only from the CODEX_THREAD_ID environment variable (on Windows, $env:CODEX_THREAD_ID); this is the thread ID provided by the current session, do not guess or scan old sessions. Claude Code, CodeBuddy and Qoder use the current session ID; Pi reads PI_SESSION_ID from the current native shell. If no real session ID can be obtained, pause binding, status changes, and reporting, and prompt to upgrade the tool or rebind; continue handling the business request.\n\nThis session stays bound to the task; subsequent turns sync user messages, final reply, and task status according to the Skill rules until the conversation ends."
+  },
+  "localserver_cli_skill_prompt": {
+    "description": "CLI prompt for WeChat channel fallback tasks. SkillPath is a markdown local link to the teamsboard-im-bot-cli Skill; when missing, the Skill is referenced by name only.",
+    "other": "[$teamsboard-im-bot-cli]({{.SkillPath}})\n\nUse the teamsboard-im-bot-cli Skill to handle this TeamBuddy WeChat channel fallback task: when a WeChat message is not recognized as a known command, TeamBuddy creates a dedicated task and forwards it to the local CLI.\n\nBound task UUID: {{.TaskUUID}}\nTask title: {{.TaskTitle}}\nTask status: {{.TaskStatus}}\nUser message: {{.Message}}\n\nFollow the flow described by the teamsboard-im-bot-cli Skill. When finished, post the result back to WeChat via /api/local/cli-skill/chat-reply. Use /api/local/cli-skill/messages or /api/local/cli-skill/activities to report intermediate progress or failures to TeamBuddy while processing.\n\nThis session is bound to the WeChat task for as long as it runs. TeamBuddy will notify the user automatically if the CLI exits or is cancelled."
   },
   "localserver_current_session_unavailable": {
     "other": "The current agent has no CLI session to continue"
@@ -871,6 +911,9 @@
     "one": "{{.Count}} task still uses this status, so it cannot be deleted",
     "other": "{{.Count}} tasks still use this status, so it cannot be deleted"
   },
+  "localserver_no_active_step": {
+    "other": "The task has no active step to advance."
+  },
   "localserver_no_update_fields": {
     "other": "No fields to update"
   },
@@ -945,10 +988,10 @@
     "other": "Activity type must be question or result"
   },
   "localserver_skill_caller_forbidden": {
-    "other": "Only the local TeamsBoard Skill may call this endpoint"
+    "other": "Only the local TeamBuddy Skill may call this endpoint"
   },
   "localserver_skill_loopback_required": {
-    "other": "The TeamsBoard Skill must connect through loopback"
+    "other": "The TeamBuddy Skill must connect through loopback"
   },
   "localserver_skill_status_invalid": {
     "other": "Status must be pending, in_progress, blocked, or done"
@@ -995,6 +1038,9 @@
   "localserver_vibe_coding_assigned_activity": {
     "other": "Assigned to Vibe Coding"
   },
+  "localserver_vibe_session_stale": {
+    "other": "This session is not bound or its binding has changed. Upgrade the tool or rebind it in the client before reporting."
+  },
   "localserver_vibe_session_thread_id_invalid": {
     "other": "The session ID is invalid"
   },
@@ -1019,8 +1065,14 @@
   "localserver_workspace_invalid": {
     "other": "Invalid workspace directory"
   },
+  "localserver_workspace_name_invalid": {
+    "other": "The workspace name must be a single line of up to 200 characters"
+  },
   "localserver_workspace_required": {
     "other": "At least one workspace directory is required"
+  },
+  "localserver_workspace_tasks_changed": {
+    "other": "A task was deleted or its working directory changed. Review the deletion again"
   },
   "localserver_workspace_unavailable": {
     "other": "The task workspace directory is unavailable"
@@ -1032,7 +1084,7 @@
     "other": "Codex finished this turn without a text result."
   },
   "remote_wechat_codex_executable_unavailable": {
-    "other": "The TeamsBoard backend cannot find the Codex command. Check the Codex installation or restart TeamsBoard and try again."
+    "other": "The TeamBuddy backend cannot find the Codex command. Check the Codex installation or restart TeamBuddy and try again."
   },
   "remote_wechat_codex_failed": {
     "other": "The Codex turn did not finish successfully. Check the session in the client."
@@ -1047,34 +1099,40 @@
     "other": "Another process currently holds this Codex thread's writer lock, so WeChat cannot send a message. Try again after it releases the thread."
   },
   "remote_wechat_config_cli": {
-    "other": "The task execution setup is incomplete. Select a CLI tool in TeamsBoard."
+    "other": "The task execution setup is incomplete. Select a CLI tool in TeamBuddy."
   },
   "remote_wechat_config_codex_binding": {
-    "other": "The task execution setup is incomplete. Bind a valid Codex session in TeamsBoard."
+    "other": "The task execution setup is incomplete. Bind a valid Codex session in TeamBuddy."
   },
   "remote_wechat_config_expert": {
-    "other": "The task execution setup is incomplete. Configure an available expert group in TeamsBoard."
+    "other": "The task execution setup is incomplete. Configure an available expert group in TeamBuddy."
   },
   "remote_wechat_config_mode": {
-    "other": "The task execution setup is incomplete. Choose a supported execution mode in TeamsBoard."
+    "other": "The task execution setup is incomplete. Choose a supported execution mode in TeamBuddy."
   },
   "remote_wechat_config_model": {
-    "other": "The task execution setup is incomplete. Select a model in TeamsBoard."
+    "other": "The task execution setup is incomplete. Select a model in TeamBuddy."
   },
   "remote_wechat_config_pipeline": {
-    "other": "The task execution setup is incomplete. Complete the pipeline and its step settings in TeamsBoard."
+    "other": "The task execution setup is incomplete. Complete the pipeline and its step settings in TeamBuddy."
   },
   "remote_wechat_config_step": {
-    "other": "The task execution setup is incomplete. Configure an executable task step in TeamsBoard."
+    "other": "The task execution setup is incomplete. Configure an executable task step in TeamBuddy."
   },
   "remote_wechat_config_workspace": {
-    "other": "The task execution setup is incomplete. Set an available workspace directory in TeamsBoard."
+    "other": "The task execution setup is incomplete. Set an available workspace directory in TeamBuddy."
   },
   "remote_wechat_connect_failed": {
     "other": "Could not connect WeChat. Refresh the QR code and try again."
   },
   "remote_wechat_connected": {
     "other": "WeChat is already connected"
+  },
+  "remote_wechat_cli_unconfigured_for_dispatch": {
+    "other": "You can configure a CLI to handle instructions with AI assistance.\n\n{{.Help}}"
+  },
+  "remote_wechat_cli_disabled_for_dispatch": {
+    "other": "The CLI fallback is disabled. To enable it, turn on the master switch in Configure CLI on the client Remote Channels page.\n\n{{.Help}}"
   },
   "remote_wechat_disconnect_failed": {
     "other": "Could not disconnect WeChat"
@@ -1086,16 +1144,19 @@
     "other": "Codex may have started this instruction, but the client did not receive a run ID. Check the session in the client before sending it again."
   },
   "remote_wechat_empty_tasks": {
-    "other": "There are no {{.Status}} tasks.\n{{.Help}}"
+    "other": "There are no {{.Status}} tasks.\n\n{{.Help}}"
   },
   "remote_wechat_final_empty": {
     "other": "The task finished without a text result."
   },
   "remote_wechat_help": {
-    "other": "Use /task -a for all tasks, /task -r (or /task) for running tasks, /task -f for completed tasks, or /task -e for blocked tasks. Send @ followed by a task ID to select it."
+    "other": "Use /task -a for all tasks, /task -r (or /task) for running tasks, /task -f for completed tasks, or /task -e for blocked tasks. \n\nSend @ followed by a task ID to select it. \n\nSend /help for all commands."
+  },
+  "remote_wechat_help_full": {
+    "other": "📋 TeamsBoard WeChat channel commands:\n\n[Tasks]\n\n• /task or /task -r: list active tasks\n\n• /task -a: list all tasks\n\n• /task -f: list done tasks\n\n• /task -e: list blocked tasks\n\n• @: list all tasks\n\n[Task actions]\n\n• @<task-id>: switch to that task\n\n• @<task-id> <message>: send a message to that task\n\n• /ti or /task-info -id=<task>: show task details (friendly id = short id or list index)\n\n• /ct or /create-task -t=<title> [-d=<desc>] [-w=<dir>] [-pid=<project index>] [-plid=<pipeline index>] [-egid=<expert group index>] [-em=<mode>] [-et=<cli>] [-emdl=<model>]: create a local task (many parameters, mainly used by the CLI fallback)\n\n• /ctt or /create-team-task -tid=<local task short id> -ttid=<my-work ttid> [-t=<title>]: create a team work that inherits the local task's config (project / pipeline / sub-projects / work dirs / per-step CLI & model). This is the most common way to create a task; copy the <ttid> number from /tt output for -ttid.\n\n• /n -id=<task>: advance to the next step. On the last step, replies \"this is already the last step\" without completing the task.\n\n[Direct messages]\n\n• Just send a message: routed to the currently bound task\n\n[Session control]\n\n• /exit or /q or 退出: leave the current task\n\n• /c or /cancel or 取消: cancel the current task (two-step confirm, -f to skip)\n\n• /r or /resume or 继续: resume the current task (two-step confirm, -f to skip)\n\n• /d or /done or 完成: mark the current task done and leave (two-step confirm, -f to skip)\n\n[Operate the local client]\n\n• /tt or /teamstask: list my work (cloud)\n\n• /pro or /projects: list local projects\n\n• /pls or /pipelines: list pipelines (local + cached cloud)\n\n• /egs or /expert-groups: list expert groups (local + cached cloud)\n\n• /clis or /cli-discovery: list installed CLIs\n\n• /clim or /cli-models -cid=<N>: list models for the given CLI\n\n• /vcl or /vibecodinglist or /codex-capability: list Vibe Coding tools\n\n• /swm or /switch-model -id=<task> [-cid=<N>] (-mid=<N> | -emdl=<model name>): switch CLI / model (with -mid alone the task's current CLI is kept; the session is not stopped)\n\n• /swcli or /switch-cli -id=<task> -cid=<N> (-mid=<N> | -emdl=<model name>): switch CLI / model\n\n• /swr or /switch-run -t=<cli|pls|egs|vcl> -id=<task> [-plid=<N>] [-egid=<N>] [-vid=<N>]: switch execution mode (archive + rebuild)\n\n[Misc]\n\n• /help or /h: show this help"
   },
   "remote_wechat_id_invalid": {
-    "other": "Invalid task ID.\n{{.Help}}"
+    "other": "Invalid task ID.\n\n{{.Help}}"
   },
   "remote_wechat_last_none": {
     "other": "No final result yet"
@@ -1117,10 +1178,10 @@
     "other": "Which task would you like to use?\n\n{{.Help}}"
   },
   "remote_wechat_params_invalid": {
-    "other": "Unsupported /task option.\n{{.Help}}"
+    "other": "Unsupported /task option.\n\n{{.Help}}"
   },
   "remote_wechat_processing_failed": {
-    "other": "Could not process the instruction. Check whether it ran in the client before deciding to retry."
+    "other": "Could not process the instruction: {{.Detail}}\n\nCheck the client-side CLI configuration (cli_type / cli_model) and that the CLI executable is reachable before retrying.\n\n{{.Help}}"
   },
   "remote_wechat_qr_error": {
     "other": "Could not get a WeChat login QR code"
@@ -1129,7 +1190,7 @@
     "other": "Could not render the WeChat login QR code"
   },
   "remote_wechat_result": {
-    "other": "#{{.ID}} {{.Task}} result for this run:\n\n{{.Result}}\n\nSend @{{.ID}} to select this task and continue."
+    "other": "@{{.ID}} {{.Task}} result for this run:\n\n{{.Result}}\n\nSend @{{.ID}} to select this task and continue."
   },
   "remote_wechat_result_unavailable": {
     "other": "Could not retrieve the result for this run. Check the task execution history in the client."
@@ -1139,6 +1200,9 @@
   },
   "remote_wechat_send_ack": {
     "other": "Switched to {{.Task}} and sent: {{.Message}}\n\nI will send the final result when it is ready. You cannot send another message to this task while it is running. Send @ followed by a task ID to switch tasks."
+  },
+  "remote_wechat_cli_fallback_ack": {
+    "other": "Instruction received. A dedicated task @{{.ID}} has been created and will be handled by {{.CLI}}.\n\nYou cannot send another message to this task while it is running. I will notify you when it finishes or fails. Track progress under \"All Tasks\" in the client."
   },
   "remote_wechat_state_error": {
     "other": "Could not read the WeChat connection state"
@@ -1155,14 +1219,17 @@
   "remote_wechat_status_running": {
     "other": "running"
   },
+  "remote_wechat_status_not_done": {
+    "other": "not completed"
+  },
   "remote_wechat_switch": {
-    "other": "Switched to {{.Task}}. Its most recent final result is:\n{{.Result}}\n\nYou can now send messages directly to this task. Send @ followed by a task ID to switch tasks."
+    "other": "Switched to {{.Task}}. Its most recent final result is:\n\n{{.Result}}\n\nYou can now send messages directly to this task. Send @ followed by a task ID to switch tasks."
   },
   "remote_wechat_task_deleted_title": {
     "other": "Deleted task"
   },
   "remote_wechat_task_missing": {
-    "other": "The task was not found or has been deleted.\n{{.Help}}"
+    "other": "The task was not found or has been deleted.\n\n{{.Help}}"
   },
   "remote_wechat_uncertain": {
     "other": "The client restarted while your last instruction was being processed. Its execution state is uncertain. Check the task in the client before sending it again."
@@ -1178,6 +1245,30 @@
   },
   "remote_wechat_verify_invalid": {
     "other": "Enter the verification code shown in WeChat"
+  },
+  "remote_wechat_task_exited": {
+    "other": "Exited task: {{.Task}}\n\n{{.Tasks}}"
+  },
+  "remote_wechat_task_resumed": {
+    "other": "Resumed execution of task {{.Task}}."
+  },
+  "remote_wechat_task_completed": {
+    "other": "Completed task: {{.Task}}\n\n{{.Tasks}}"
+  },
+  "remote_wechat_no_task_bound": {
+    "other": "You are not inside a task. Current running tasks:\n\n{{.Tasks}}"
+  },
+  "remote_wechat_cancel_confirm": {
+    "other": "Cancel execution of task {{.Task}}?\n\nReply yes / y / 是 / 对 / 取消 to confirm, or send anything else to ignore this prompt.\n\nTo skip confirmation, send /c -f instead."
+  },
+  "remote_wechat_resume_confirm": {
+    "other": "Resume execution of task {{.Task}}?\n\nReply yes / y / 是 / 对 to confirm, or send anything else to ignore this prompt.\n\nTo skip confirmation, send /r -f instead."
+  },
+  "remote_wechat_done_confirm": {
+    "other": "Mark task {{.Task}} as done and leave it?\n\nReply yes / y / 是 / 对 to confirm, or send anything else to ignore this prompt.\n\nTo skip confirmation, send /d -f instead."
+  },
+  "remote_wechat_cancel_done": {
+    "other": "Task execution cancelled.\n\nEnter /q, /exit or 退出 to leave the task.\n\n{{.Tasks}}"
   },
   "taskgit_branch_invalid": {
     "other": "The Git branch is invalid or does not exist"
@@ -1264,5 +1355,176 @@
   },
   "tool_sql_unsupported": {
     "other": "Unsupported SQL operation: the database tool allows only read-only queries (SELECT/EXPLAIN/SHOW/DESC)"
+  },
+  "localserver_skill_cloud_login_required": {
+    "other": "Not signed in to the cloud. Please sign in from the client first."
+  },
+  "localserver_skill_team_work_empty": {
+    "other": "No work items to handle."
+  },
+  "localserver_skill_team_work_list": {
+    "other": "My work (* marks a local task already created):\n\n{{.Items}}"
+  },
+  "localserver_skill_projects_empty": {
+    "other": "No local projects."
+  },
+  "localserver_skill_projects_list": {
+    "other": "Local projects:\n\n{{.Items}}"
+  },
+  "localserver_skill_pipelines_empty": {
+    "other": "No pipelines available (neither local nor cached cloud)."
+  },
+  "localserver_skill_pipelines_list": {
+    "other": "Pipelines:\n\n{{.Items}}"
+  },
+  "localserver_skill_expert_groups_empty": {
+    "other": "No expert groups available (neither local nor cached cloud)."
+  },
+  "localserver_skill_expert_groups_list": {
+    "other": "Expert groups:\n\n{{.Items}}"
+  },
+  "localserver_skill_expert_group_ready": {
+    "other": "ready"
+  },
+  "localserver_skill_expert_group_not_ready": {
+    "other": "not configured"
+  },
+  "localserver_skill_clis_empty": {
+    "other": "No CLI tools detected. Install one in the client first."
+  },
+  "localserver_skill_clis_list": {
+    "other": "Installed CLIs:\n\n{{.Items}}"
+  },
+  "localserver_skill_cli_installed": {
+    "other": "installed"
+  },
+  "localserver_skill_cli_missing": {
+    "other": "missing"
+  },
+  "localserver_skill_cli_required": {
+    "other": "Cannot determine the task's current CLI. Provide -cid=<CLI index>. Use /clis to see the list."
+  },
+  "localserver_skill_cli_index_invalid": {
+    "other": "CLI index is invalid or out of range. Use /clis to see the current list."
+  },
+  "localserver_skill_model_index_invalid": {
+    "other": "Model index is invalid or out of range. Use /clim -cid=N to see models for that CLI."
+  },
+  "localserver_skill_models_empty": {
+    "other": "No models available for {{.CLI}}."
+  },
+  "localserver_skill_models_list": {
+    "other": "Models for {{.CLI}}:\n\n{{.Items}}"
+  },
+  "localserver_skill_vibe_tools_empty": {
+    "other": "No Vibe Coding tools available."
+  },
+  "localserver_skill_vibe_tools_list": {
+    "other": "Vibe Coding tools:\n\n{{.Items}}"
+  },
+  "localserver_skill_vibe_tool_ready": {
+    "other": "ready"
+  },
+  "localserver_skill_vibe_tool_not_ready": {
+    "other": "not configured"
+  },
+  "localserver_skill_vibe_tool_required": {
+    "other": "Switching Vibe Coding tool requires -vid=<tool index>. Use /vcl to see the list."
+  },
+  "localserver_skill_vibe_tool_index_invalid": {
+    "other": "Vibe Coding tool index is invalid or out of range."
+  },
+  "localserver_skill_task_ref_required": {
+    "other": "Task reference is required: pass -id=<short id or list index>."
+  },
+  "localserver_skill_task_ref_invalid": {
+    "other": "Task reference is invalid or the task no longer exists."
+  },
+  "localserver_skill_task_last_step": {
+    "other": "This is already the last step."
+  },
+  "localserver_skill_task_next_step_started": {
+    "other": "Advanced to the next step."
+  },
+  "localserver_skill_task_created": {
+    "other": "Created task @{{.ID}} {{.Title}}."
+  },
+  "localserver_skill_template_requires_pipeline": {
+    "other": "The reference task must already be bound to a pipeline."
+  },
+  "localserver_skill_team_work_index_invalid": {
+    "other": "My-work index is invalid. Use /tt to see the list."
+  },
+  "localserver_skill_team_work_id_not_found": {
+    "other": "My-work ttid not found. Copy the <ttid> number from /tt output and retry."
+  },
+  "localserver_skill_team_work_item_missing": {
+    "other": "The selected work item is missing type or id. Run /tt again to pick a valid entry."
+  },
+  "localserver_skill_execution_switched": {
+    "other": "Execution mode switched."
+  },
+  "localserver_skill_pipeline_index_required": {
+    "other": "Switching pipeline requires -plid=<pipeline index>. Use /pls to see the list."
+  },
+  "localserver_skill_pipeline_required_for_team_task": {
+    "other": "Creating a team task requires -plid=<pipeline index>."
+  },
+  "localserver_skill_expert_group_index_required": {
+    "other": "Switching expert group requires -egid=<expert group index>. Use /egs to see the list."
+  },
+  "localserver_skill_pipeline_index_invalid": {
+    "other": "Pipeline index is invalid or out of range."
+  },
+  "localserver_skill_project_index_invalid": {
+    "other": "Project index is invalid or out of range."
+  },
+  "localserver_skill_expert_group_index_invalid": {
+    "other": "Expert group index is invalid or out of range."
+  },
+  "localserver_skill_step_configs_require_pipeline": {
+    "other": "step_configs must be paired with -plid=<pipeline index>."
+  },
+  "localserver_skill_step_unknown": {
+    "other": "step_configs contains an unrecognized step reference. Use the cloud step id or local step uuid."
+  },
+  "remote_wechat_skill_call_failed": {
+    "other": "Command failed: {{.Detail}}"
+  },
+  "remote_wechat_skill_missing_cli_index": {
+    "other": "Pass -cid=<CLI index>. Use /clis to see the list."
+  },
+  "remote_wechat_skill_missing_task_ref": {
+    "other": "Pass -id=<short id or list index>. Use /task -a to see the list."
+  },
+  "remote_wechat_skill_missing_model_index": {
+    "other": "Pass -mid=<model index> (or -emdl=<model name>). Use /clim -cid=N to see models for that CLI."
+  },
+  "remote_wechat_skill_missing_title": {
+    "other": "Pass -t=<task title>."
+  },
+  "remote_wechat_skill_missing_mode": {
+    "other": "Pass -t=<execution mode>: cli / pls / egs / vcl."
+  },
+  "remote_wechat_skill_missing_template_ref": {
+    "other": "Pass -tid=<local task short id or list index>. Use /task -a to see the list."
+  },
+  "remote_wechat_skill_missing_team_work_index": {
+    "other": "Pass -ttid=<my-work ttid>. Copy it from the <ttid> number in /tt output."
+  },
+  "localserver_skill_team_task_created": {
+    "other": "Team task @{{.ID}} {{.Title}} created."
+  },
+  "localserver_skill_task_created_pipeline_hint": {
+    "other": "This is a pipeline task. Use /n -id={{.ID}} to start or move to the next pipeline step."
+  },
+  "localserver_skill_team_task_created_pipeline_hint": {
+    "other": "This is a pipeline task. Use /n -id={{.ID}} to start or move to the next pipeline step."
+  },
+  "localserver_skill_task_created_started": {
+    "other": "Task started executing."
+  },
+  "localserver_skill_task_first_step_started": {
+    "other": "Pipeline first step started. Task is now executing."
   }
 }

@@ -50,7 +50,7 @@ func (w *idleWatchState) observe(e ExecutorEvent, now time.Time) bool {
 			w.anonymousPermission = true
 		}
 	case EventToolCall:
-		tool := watchedTool{started: now, subprocess: isSubprocessTool(e.Content)}
+		tool := watchedTool{started: now, subprocess: e.ToolKind == ToolKindShell || isSubprocessTool(e.Content)}
 		if id == "" {
 			w.anonymous = append(w.anonymous, tool)
 		} else {

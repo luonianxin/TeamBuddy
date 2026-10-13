@@ -11,6 +11,7 @@ import (
 
 	"goteams-client/internal/applog"
 	"goteams-client/internal/bootstrap"
+	"goteams-client/internal/mcpbridge"
 )
 
 // Injected by tools/build through -ldflags -X during build; Version comes from desktop/package.json.
@@ -21,6 +22,17 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		if len(os.Args) != 2 {
+			fmt.Fprintf(os.Stderr, "teamsboard mcp: unexpected arguments\n")
+			os.Exit(2)
+		}
+		if err := mcpbridge.Run(context.Background(), Version); err != nil {
+			fmt.Fprintf(os.Stderr, "teamsboard mcp: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if rawParentPID := strings.TrimSpace(os.Getenv("GOTEAMS_PARENT_PID")); rawParentPID != "" {

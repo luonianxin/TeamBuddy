@@ -5,6 +5,8 @@
   "layoutSwitch": "Board and list view switcher",
   "boardView": "Board view",
   "listView": "List view",
+  "searchTasks": "Search tasks",
+  "noMatchingTasks": "No matching tasks found",
   "teamWork": "Team workspace",
   "comingSoon": "Coming soon",
   "newTask": "New task",

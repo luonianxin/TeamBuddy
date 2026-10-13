@@ -1,18 +1,18 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  DeleteOutlined,
-  FileTextOutlined,
-  FolderAddOutlined,
-  FolderOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  PlusOutlined,
   SearchOutlined,
   SortAscendingOutlined,
   SortDescendingOutlined,
 } from '@ant-design/icons-vue'
 import type { KnowledgeDocument, KnowledgeFolderNode } from '@/api/knowledge'
+import KnowledgeAddMenu from '@/views/knowledge/components/KnowledgeAddMenu.vue'
+import KnowledgeBlankAddDropdown from '@/views/knowledge/components/KnowledgeBlankAddDropdown.vue'
+import directoryToggleIcon from '@/assets/icons/knowledge-directory-toggle.svg'
+import knowledgeDocumentIcon from '@/assets/icons/knowledge-document.svg'
+import knowledgeFolderHeadingIcon from '@/assets/icons/knowledge-folder-heading.svg'
+import knowledgeFolderTreeIcon from '@/assets/icons/knowledge-folder-tree.svg'
+import knowledgeQuickAddIcon from '@/assets/icons/knowledge-quick-add.svg'
 import { useAppI18n } from '@/i18n'
 
 // S-UI-14: 文件夹详情列表页（与「回收站」「编辑器」并列的独立主区工作区）
@@ -35,6 +35,7 @@ const props = defineProps<{
   childFolders: KnowledgeFolderNode[]
   childDocuments: KnowledgeDocument[]
   loading?: boolean
+  folderCreating?: boolean
   /** 父级 sidebar 折叠状态，用于切换按钮图标 */
   sidebarCollapsed?: boolean
 }>()
@@ -43,11 +44,8 @@ const emit = defineEmits<{
   'open-folder': [folderId: number]
   'open-document': [uuid: string]
   'create-document': [folderId: number]
-  'create-txt-document': [folderId: number]
   'create-folder': [folderId: number]
   'delete-folder': [folderId: number]
-  'open-create-modal': [type: 'document' | 'folder', folderId: number]
-  'toggle-inspector': []
   /** 触发父级折叠 / 展开左侧目录栏 */
   'toggle-sidebar': []
   navigate: [folderId: number]
@@ -126,22 +124,24 @@ function toggleSortDirection() {
 
 <template>
   <main class="folder-detail">
-    <!-- S-UI-14: 面包屑「上级文件夹 / 当前文件夹」，点击根节点回到空态；右侧抽屉按钮（默认收起） -->
+    <!-- S-UI-14: 面包屑「上级文件夹 / 当前文件夹」，点击根节点回到空态。 -->
     <nav class="detail-breadcrumb">
       <div class="detail-breadcrumb-leading">
         <!-- 左侧目录栏折叠 / 展开切换（固定在面包屑最左侧） -->
-        <a-tooltip
-          :title="(props.sidebarCollapsed ?? false) ? t('knowledge.expandSidebar') : t('knowledge.collapseSidebar')"
+        <button
+          class="icon-button sidebar-nav-toggle"
+          type="button"
+          :aria-label="(props.sidebarCollapsed ?? false) ? t('knowledge.expandSidebar') : t('knowledge.collapseSidebar')"
+          @click="emit('toggle-sidebar')"
         >
-          <button
-            class="icon-button sidebar-nav-toggle"
-            type="button"
-            :aria-label="(props.sidebarCollapsed ?? false) ? t('knowledge.expandSidebar') : t('knowledge.collapseSidebar')"
-            @click="emit('toggle-sidebar')"
-          >
-            <component :is="(props.sidebarCollapsed ?? false) ? MenuUnfoldOutlined : MenuFoldOutlined" />
-          </button>
-        </a-tooltip>
+          <img
+            :src="directoryToggleIcon"
+            alt=""
+            aria-hidden="true"
+            class="sidebar-nav-toggle-icon"
+            :class="{ 'is-collapsed': props.sidebarCollapsed ?? false }"
+          />
+        </button>
         <div class="detail-breadcrumb-path">
           <template v-for="(item, index) in breadcrumbs" :key="item.id">
             <button
@@ -160,58 +160,28 @@ function toggleSortDirection() {
           </template>
         </div>
       </div>
-      <div class="detail-breadcrumb-actions">
-        <!-- 抽屉展开 / 折叠切换（固定在面包屑右侧，默认收起） -->
-        <a-tooltip :title="t('knowledge.inspectorExpand')">
-          <button
-            class="icon-button"
-            type="button"
-            :aria-label="t('knowledge.inspectorExpand')"
-            @click="emit('toggle-inspector')"
-          >
-            <MenuUnfoldOutlined />
-          </button>
-        </a-tooltip>
-      </div>
     </nav>
 
     <header class="detail-header">
       <div class="detail-title-section">
-        <span class="detail-folder-icon"><FolderOutlined /></span>
+        <span class="detail-folder-icon">
+          <img :src="knowledgeFolderHeadingIcon" alt="" aria-hidden="true" />
+        </span>
         <h2 class="detail-title">{{ folderName }}</h2>
       </div>
       <div class="detail-actions">
-        <a-tooltip :title="t('knowledge.deleteFolder')">
-          <button
-            class="icon-button danger-button"
-            type="button"
-            :aria-label="t('knowledge.deleteFolder')"
-            @click="emit('delete-folder', folderId)"
-          >
-            <DeleteOutlined />
-          </button>
-        </a-tooltip>
-        <!-- S-UI-14: 右上「快速添加」；新建 md/文件夹走弹窗输入名称，txt 走直接创建 -->
+        <!-- S-UI-14: 右上「快速添加」 -->
         <a-dropdown :trigger="['click']">
           <button class="quick-add-button" type="button">
-            <PlusOutlined />
+            <img :src="knowledgeQuickAddIcon" alt="" aria-hidden="true" />
             <span>{{ t('knowledge.quickAdd') }}</span>
           </button>
           <template #overlay>
-            <a-menu>
-              <a-menu-item key="md-document" @click="emit('open-create-modal', 'document', folderId)">
-                <FileTextOutlined /> {{ t('knowledge.newMdDocument') }}
-              </a-menu-item>
-              <a-menu-item key="folder" @click="emit('open-create-modal', 'folder', folderId)">
-                <FolderAddOutlined /> {{ t('knowledge.newFolder') }}
-              </a-menu-item>
-              <a-sub-menu key="more">
-                <template #title>{{ t('knowledge.more') }}</template>
-                <a-menu-item key="txt-document" @click="emit('create-txt-document', folderId)">
-                  <FileTextOutlined /> {{ t('knowledge.newTxtDocument') }}
-                </a-menu-item>
-              </a-sub-menu>
-            </a-menu>
+            <KnowledgeAddMenu
+              :folder-creating="folderCreating"
+              @create-document="emit('create-document', folderId)"
+              @create-folder="emit('create-folder', folderId)"
+            />
           </template>
         </a-dropdown>
       </div>
@@ -221,19 +191,20 @@ function toggleSortDirection() {
       <a-input
         v-model:value="keyword"
         class="detail-search"
+        size="small"
         allow-clear
         :placeholder="t('knowledge.detailSearchPlaceholder')"
       >
         <template #suffix><SearchOutlined /></template>
       </a-input>
       <!-- S-UI-16: 列表内搜索（按名称过滤）与排序（按名称 / 按更新时间），均为前端本地行为 -->
-      <a-select v-model:value="sortKey" class="detail-sort-select">
+      <a-select v-model:value="sortKey" class="detail-sort-select" size="small">
         <a-select-option value="updated_at">{{ t('knowledge.sortByUpdatedAt') }}</a-select-option>
         <a-select-option value="name">{{ t('knowledge.sortByName') }}</a-select-option>
       </a-select>
       <a-tooltip :title="sortDirectionLabel">
         <button
-          class="icon-button"
+          class="icon-button detail-sort-direction"
           type="button"
           :aria-label="sortDirectionLabel"
           @click="toggleSortDirection"
@@ -244,25 +215,43 @@ function toggleSortDirection() {
       </a-tooltip>
     </div>
 
-    <div class="detail-content">
+    <KnowledgeBlankAddDropdown
+      :key="folderId"
+      class="detail-content"
+      :disabled="loading"
+      :folder-creating="folderCreating"
+      @create-document="emit('create-document', folderId)"
+      @create-folder="emit('create-folder', folderId)"
+    >
       <a-spin :spinning="Boolean(loading)">
-        <table class="detail-table">
+        <table class="detail-table" data-knowledge-add-ignore>
           <thead>
             <tr>
               <th scope="col" class="col-name">
-                {{ t('knowledge.detailName') }}
-                <span class="detail-count">{{ rows.length }}</span>
+                {{ t('knowledge.detailNameWithCount', { count: rows.length }) }}
               </th>
-              <th scope="col" class="col-owner">{{ t('knowledge.detailOwnerLocal') }}</th>
-              <th scope="col" class="col-time">{{ t('knowledge.detailLastVisited') }}</th>
+              <th scope="col" class="col-owner">{{ t('knowledge.detailUpdatedBy') }}</th>
+              <th scope="col" class="col-time">{{ t('knowledge.detailUpdatedAt') }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="row in rows" :key="row.key" class="detail-row">
               <td class="col-name">
                 <button type="button" class="detail-row-name" @click="openRow(row)">
-                  <FolderOutlined v-if="row.kind === 'folder'" class="row-folder-icon" />
-                  <FileTextOutlined v-else class="row-document-icon" />
+                  <img
+                    v-if="row.kind === 'folder'"
+                    :src="knowledgeFolderTreeIcon"
+                    alt=""
+                    aria-hidden="true"
+                    class="row-folder-icon"
+                  />
+                  <img
+                    v-else
+                    :src="knowledgeDocumentIcon"
+                    alt=""
+                    aria-hidden="true"
+                    class="row-document-icon"
+                  />
                   <span class="row-title">{{ row.name }}</span>
                 </button>
               </td>
@@ -274,7 +263,7 @@ function toggleSortDirection() {
         <!-- 边界 E15：空文件夹显示空态，不报错 -->
         <div v-if="!rows.length" class="detail-empty">{{ t('knowledge.detailEmpty') }}</div>
       </a-spin>
-    </div>
+    </KnowledgeBlankAddDropdown>
   </main>
 </template>
 
@@ -290,7 +279,7 @@ function toggleSortDirection() {
 
 .detail-breadcrumb {
   display: flex;
-  height: 48px;
+  height: 44px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
@@ -308,13 +297,6 @@ function toggleSortDirection() {
   overflow: hidden;
 }
 
-.detail-breadcrumb-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-}
-
 /* 面包屑行左侧容器：包含 sidebar 折叠按钮 + 路径导航 */
 .detail-breadcrumb-leading {
   display: flex;
@@ -326,6 +308,17 @@ function toggleSortDirection() {
 
 .sidebar-nav-toggle {
   flex: 0 0 auto;
+}
+
+.sidebar-nav-toggle-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  transition: transform 0.18s ease;
+}
+
+.sidebar-nav-toggle-icon.is-collapsed {
+  transform: rotate(180deg);
 }
 
 .crumb {
@@ -365,28 +358,32 @@ function toggleSortDirection() {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 24px;
-  border-bottom: 1px solid #f0f0f0;
+  padding: 10px 24px;
 }
 
 .detail-title-section {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .detail-folder-icon {
   display: flex;
-  width: 32px;
-  height: 32px;
+  width: 20px;
+  height: 20px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
-  color: #3157e2;
-  background: #e5efff;
+  color: #262626;
+  background: transparent;
   font-size: 16px;
+}
+
+.detail-folder-icon img,
+.row-folder-icon,
+.row-document-icon {
+  display: block;
 }
 
 .detail-title {
@@ -432,6 +429,10 @@ function toggleSortDirection() {
   outline-offset: 2px;
 }
 
+.quick-add-button img {
+  display: block;
+}
+
 .icon-button {
   display: inline-flex;
   width: 32px;
@@ -465,18 +466,42 @@ function toggleSortDirection() {
 
 .detail-toolbar {
   display: flex;
+  min-height: 40px;
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
-  padding: 10px 24px 0;
+  padding: 5px 24px;
+  border-bottom: 1px solid #f0f0f0;
 }
 
 .detail-search {
-  max-width: 280px;
+  max-width: 240px;
+  padding: 4px 7px;
+  font-size: 12px;
+}
+
+.detail-search :deep(.ant-input) {
+  font-size: 12px;
 }
 
 .detail-sort-select {
-  width: 168px;
+  width: 148px;
+}
+
+.detail-sort-select :deep(.ant-select-selector) {
+  height: auto !important;
+  padding: 4px 7px !important;
+  font-size: 12px;
+}
+
+.detail-sort-select :deep(.ant-select-selection-item) {
+  font-size: 12px;
+  line-height: 20px !important;
+}
+
+.detail-sort-direction {
+  width: 28px;
+  height: 28px;
 }
 
 .detail-content {
@@ -499,10 +524,10 @@ function toggleSortDirection() {
 }
 
 .detail-table th {
-  height: 48px;
-  border-bottom: 1px solid #f0f0f0;
+  height: 49px;
+  border-bottom: 1px solid #f3f4f6;
   color: #8c8c8c;
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 400;
   text-align: left;
 }
@@ -522,14 +547,14 @@ function toggleSortDirection() {
 }
 
 .detail-row {
-  height: 56px;
-  border-bottom: 1px solid #f0f0f0;
+  height: 49px;
+  border-bottom: 1px solid #f3f4f6;
   color: #595959;
   font-size: 14px;
 }
 
 .detail-row:hover {
-  background: #f9fafb;
+  background: #f5f8ff;
 }
 
 .detail-row td {
@@ -547,7 +572,7 @@ function toggleSortDirection() {
   width: 100%;
   min-width: 0;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 0;
   border: 0;
   color: #262626;
@@ -563,15 +588,13 @@ function toggleSortDirection() {
 }
 
 .row-folder-icon {
+  display: block;
   flex: 0 0 auto;
-  color: #3157e2;
-  font-size: 16px;
 }
 
 .row-document-icon {
+  display: block;
   flex: 0 0 auto;
-  color: #8c8c8c;
-  font-size: 16px;
 }
 
 .row-title {

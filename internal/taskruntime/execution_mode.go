@@ -18,6 +18,7 @@ const (
 	ExecutionToolCodeBuddy   = "codebuddy"
 	ExecutionToolQoder       = "qoder"
 	ExecutionToolPi          = "pi"
+	ExecutionToolAntigravity = "antigravity"
 
 	// CLIDirectStepKey 是 CLI 直接执行模式的隐式步骤标识。该模式没有 Agent
 	// 编排，但仍复用 gt_task_steps 承载用户选定的 CLI 与模型，使会话、动态、
@@ -34,6 +35,7 @@ func VibeCodingTools() []string {
 		ExecutionToolCodex,
 		ExecutionToolCodexCLI,
 		ExecutionToolPi,
+		ExecutionToolAntigravity,
 		ExecutionToolQoder,
 		ExecutionToolCodeBuddy,
 		ExecutionToolClaude,
@@ -42,7 +44,7 @@ func VibeCodingTools() []string {
 
 func IsVibeCodingTool(tool string) bool {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case ExecutionToolCodex, ExecutionToolCodexCLI, ExecutionToolPi, ExecutionToolQoder, ExecutionToolCodeBuddy, ExecutionToolClaude:
+	case ExecutionToolCodex, ExecutionToolCodexCLI, ExecutionToolPi, ExecutionToolAntigravity, ExecutionToolQoder, ExecutionToolCodeBuddy, ExecutionToolClaude:
 		return true
 	default:
 		return false
@@ -63,6 +65,8 @@ func VibeSkillRoot(home, tool string) string {
 		return filepath.Join(home, ".qoder", "skills")
 	case ExecutionToolPi:
 		return filepath.Join(home, ".pi", "agent", "skills")
+	case ExecutionToolAntigravity:
+		return filepath.Join(home, ".gemini", "antigravity-cli", "skills")
 	default:
 		return ""
 	}

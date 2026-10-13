@@ -39,7 +39,7 @@ const CLI_DISPLAY_NAMES: Record<string, string> = {
   claude: 'Claude Code',
   codebuddy: 'CodeBuddy Code',
   codex: 'Codex CLI',
-  cursor: 'Cursor Agent',
+  cursor: 'Cursor CLI',
   opencode: 'OpenCode',
   copilot: 'GitHub Copilot CLI',
   grok: 'Grok CLI',
@@ -50,6 +50,7 @@ const CLI_DISPLAY_NAMES: Record<string, string> = {
   qwen: 'Qwen Code',
   openclaw: 'OpenClaw',
   pi: 'Pi Agent',
+  antigravity: 'Antigravity CLI',
 }
 
 export function cliDisplayName(cliType?: string) {

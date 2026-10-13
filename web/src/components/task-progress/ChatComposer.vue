@@ -180,8 +180,8 @@
               :aria-label="t('workflows.task.progress.chooseRuntime')"
             >
               <img
-                class="tool-button-icon"
-                :src="cliIcon"
+                class="tool-button-icon cli-brand-icon"
+                :src="selectedCliLogo"
                 alt=""
                 aria-hidden="true"
               />
@@ -288,7 +288,7 @@ import {
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import agentIcon from '@/assets/icons/task-composer-agent.svg'
-import cliIcon from '@/assets/icons/task-composer-cli.svg'
+import { cliLogo } from '@/composables/useCliLogo'
 import { useChatRuntimeDefaults } from '@/composables/useChatRuntimeDefaults'
 import { useCliModelOptions } from '@/composables/useCliModelOptions'
 import { useTaskImageAttachments } from '@/composables/useTaskImageAttachments'
@@ -486,6 +486,7 @@ const selectedCliLabel = computed(
     cliOptions.value.find((item) => item.type === selectedCliType.value)?.name ||
     selectedCliType.value,
 )
+const selectedCliLogo = computed(() => cliLogo(selectedCliType.value))
 const runtimeTriggerLabel = computed(() => {
   if (selectedCliType.value && selectedModelName.value) {
     return `${selectedCliLabel.value} / ${selectedModelName.value}`
@@ -1806,8 +1807,8 @@ defineExpose({ resetAfterSubmit })
     box-shadow 0.15s;
 }
 .composer-shell:focus-within {
-  border-color: #3157e2;
-  box-shadow: 0 0 0 3px rgba(49, 87, 226, 0.08);
+  border-color: #e5e7eb;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.08);
 }
 .composer-shell.is-disabled,
 .composer-shell.is-disabled:focus-within {
@@ -2071,8 +2072,8 @@ defineExpose({ resetAfterSubmit })
   background: #fff;
   cursor: pointer;
   font-family: inherit;
-  font-size: 14px;
-  line-height: 22px;
+  font-size: 12px;
+  line-height: 20px;
   letter-spacing: -0.1504px;
   transition: background-color 0.15s;
 }
@@ -2088,6 +2089,9 @@ defineExpose({ resetAfterSubmit })
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
+}
+.cli-brand-icon {
+  object-fit: contain;
 }
 .work-directory-button {
   max-width: 240px;
