@@ -17,18 +17,12 @@ const LOGIN_SHELL_MAX_BUFFER = 64 * 1024
 const SHELL_PATH_MARKER = '__GOTEAMS_LOGIN_PATH__='
 const SUPPORTED_LOGIN_SHELLS = new Set(['bash', 'csh', 'fish', 'ksh', 'sh', 'tcsh', 'zsh'])
 const MAC_SYSTEM_PATH_DIRS = ['/usr/bin', '/bin', '/usr/sbin', '/sbin']
-// 搬迁后真实数据根记在 ~/.goteams.mlink。运行时地址跟着指针走，
-// 不能继续读已被收成空壳的默认目录。
+const { resolveRuntimeJsonPath } = require('../shared/data-root.cjs')
+
+// 新指针、新库或新结构标记存在时读 ~/.teambuddy；否则旧目录或旧指针存在时读 ~/.goteams。
+// runtime.json 不决定方案。搬迁后真实数据根记在当前方案指针里；当前指针不可读时不改读另一套根。
 function runtimeJsonPath() {
-  const home = os.homedir()
-  const fallback = path.join(home, '.goteams', 'runtime', 'runtime.json')
-  try {
-    const target = fs.readFileSync(path.join(home, '.goteams.mlink'), 'utf8').trim()
-    if (target) return path.join(target, 'runtime', 'runtime.json')
-  } catch {
-    // 还没搬迁过，使用默认数据根。
-  }
-  return fallback
+  return resolveRuntimeJsonPath(os.homedir())
 }
 
 const RUNTIME_JSON_PATH = runtimeJsonPath()
@@ -70,7 +64,9 @@ function readLastBackendPort() {
 
 // 极简 INI 解析器：仅支持本项目 [section] key = value 形态；
 // 注释以 # 或 ; 起首；值两端成对引号会被剥离。仅解析需要读取的字段，避免引入额外依赖。
+/** @returns {Record<string, Record<string, string>>} */
 function parseINI(content) {
+  /** @type {Record<string, Record<string, string>>} */
   const sections = {}
   if (typeof content !== 'string' || content.length === 0) return sections
   let currentSection = ''

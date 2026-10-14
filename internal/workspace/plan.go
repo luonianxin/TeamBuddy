@@ -37,7 +37,7 @@ func IsDesktopRuntime() bool {
 // WorkspacePlan 描述一次工作空间重定位的预览信息，供前端确认提示。
 type WorkspacePlan struct {
 	CurrentRoot   string `json:"current_root"`   // 当前生效数据根
-	TargetRoot    string `json:"target_root"`    // 搬迁后的数据根（<parent>/.goteams）
+	TargetRoot    string `json:"target_root"`    // 搬迁后的数据根（<parent>/<当前数据根目录名>）
 	TargetParent  string `json:"target_parent"`  // 用户选择的父目录
 	CrossVolume   bool   `json:"cross_volume"`   // 是否跨卷（跨卷搬迁更耗时，前端需强提示）
 	RelocatedFrom string `json:"relocated_from"` // 当前已处于重定位状态时的原父目录（未重定位为空）
@@ -46,7 +46,7 @@ type WorkspacePlan struct {
 // PlanWorkspace 校验并生成搬迁计划；所有校验失败都以明确错误返回。
 //
 // 校验规则（与产品确认）：
-//   - 目标父目录必须存在且为空（除 .goteams 外没有任何条目，且 .goteams 不允许存在）；
+//   - 目标父目录必须存在且为空（不允许已经存在当前数据根目录名）；
 //   - 目标父目录不得是当前数据根或其子目录（防止把数据搬进自己里面）；
 //   - 目标父目录不得是系统关键目录（Windows: 盘符根目录、Windows、Program Files 等）；
 //   - 目标父目录必须可写；
@@ -79,8 +79,8 @@ func PlanWorkspace(targetParent string) (*WorkspacePlan, error) {
 		return nil, fmt.Errorf("目标路径 %s 不是目录", targetParent)
 	}
 
-	// 目标父目录下不允许已经存在 .goteams（产品确认：禁止合并，避免覆盖旧数据）。
-	newRoot := filepath.Join(targetParent, dataRootDirName)
+	// 目标父目录下不允许已经存在数据根目录（产品确认：禁止合并，避免覆盖旧数据）。
+	newRoot := filepath.Join(targetParent, dataRootDirName())
 	if _, err := os.Stat(newRoot); err == nil {
 		return nil, ErrWorkspaceConflict
 	} else if !errors.Is(err, os.ErrNotExist) {

@@ -8,17 +8,15 @@ import net from 'node:net'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
+const { resolveRuntimeJsonPath } = require('../desktop/shared/data-root.cjs') as {
+  resolveRuntimeJsonPath: (home: string) => string
+}
 
 function runtimeJsonPath(): string {
-  const home = os.homedir()
-  const fallback = path.join(home, '.goteams', 'runtime', 'runtime.json')
-  try {
-    const target = fs.readFileSync(path.join(home, '.goteams.mlink'), 'utf8').trim()
-    if (target) return path.join(target, 'runtime', 'runtime.json')
-  } catch {
-    // 还没搬迁过，使用默认数据根。
-  }
-  return fallback
+  return resolveRuntimeJsonPath(os.homedir())
 }
 
 // 后端地址发现：优先环境变量显式指定（调试用），否则读取后端写入的 runtime.json，

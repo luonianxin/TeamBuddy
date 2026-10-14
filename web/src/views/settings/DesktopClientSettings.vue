@@ -39,7 +39,7 @@ const workspace = reactive<WorkspaceInfo>({
   relocated: false,
   is_desktop: true,
   os: '',
-  dir_name: '.goteams',
+  dir_name: '.teambuddy',
 })
 const workspaceLoading = ref(true)
 const workspaceError = ref('')
@@ -327,7 +327,7 @@ async function manualCheck() {
       <div class="version-row">
         <div>
           <strong>{{ t('settings.currentVersion') }} {{ currentVersion }}</strong>
-          <p>{{ t('settings.autoCheckHint') }}<a class="version-github-link" href="https://github.com/zhimaAi/TeamsBoard/releases/latest/" target="_blank" rel="noopener noreferrer">{{ t('settings.goToGitHub') }}</a></p>
+          <p>{{ t('settings.autoCheckHint') }}<a class="version-github-link" href="https://github.com/zhimaAi/TeamBuddy/releases/latest/" target="_blank" rel="noopener noreferrer">{{ t('settings.goToGitHub') }}</a></p>
         </div>
         <a-button :loading="updateStore.checking" @click="manualCheck">{{ t('settings.checkUpdate') }}</a-button>
       </div>

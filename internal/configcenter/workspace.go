@@ -34,7 +34,7 @@ type workspaceResponse struct {
 	Relocated   bool   `json:"relocated"`
 	IsDesktop   bool   `json:"is_desktop"`
 	OS          string `json:"os"`
-	DirName     string `json:"dir_name"` // 数据根目录名（.goteams），前端展示用
+	DirName     string `json:"dir_name"` // 数据根目录名（.teambuddy 或旧安装 .goteams），前端展示用
 	RestartHint string `json:"restart_hint"`
 }
 
@@ -48,7 +48,7 @@ func (h *Handler) getWorkspace(c *gin.Context) {
 			"relocated":    false,
 			"is_desktop":   workspace.IsDesktopRuntime(),
 			"os":           runtime.GOOS,
-			"dir_name":     ".goteams",
+			"dir_name":     workspace.DataRootDirName(),
 			"error":        i18n.T(c, "configcenter_workspace_resolve_failed"),
 		})
 		return
@@ -60,12 +60,12 @@ func (h *Handler) getWorkspace(c *gin.Context) {
 		Relocated:   !samePathFold(root, defaultRoot),
 		IsDesktop:   workspace.IsDesktopRuntime(),
 		OS:          runtime.GOOS,
-		DirName:     ".goteams",
+		DirName:     workspace.DataRootDirName(),
 	})
 }
 
 type setWorkspaceRequest struct {
-	// ParentDir 用户选择的目标父目录；数据根将搬迁到 <ParentDir>/.goteams。
+	// ParentDir 用户选择的目标父目录；数据根将搬迁到 <ParentDir>/<当前数据根目录名>。
 	ParentDir string `json:"parent_dir"`
 	// Confirm 必须为 true，前端确认弹窗收集用户明确同意后才置位。
 	Confirm bool `json:"confirm"`
@@ -134,7 +134,7 @@ func (h *Handler) setWorkspace(c *gin.Context) {
 func writeWorkspacePlanError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, workspace.ErrWorkspaceConflict):
-		c.JSON(http.StatusBadRequest, gin.H{"error": i18n.T(c, "configcenter_workspace_target_has_data")})
+		c.JSON(http.StatusBadRequest, gin.H{"error": i18n.Format(c, "configcenter_workspace_target_has_data", i18n.Params{"DirName": workspace.DataRootDirName()})})
 		return
 	}
 	msg := err.Error()

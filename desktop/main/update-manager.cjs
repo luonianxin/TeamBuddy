@@ -10,14 +10,14 @@ const { Transform } = require('node:stream')
 const { pipeline } = require('node:stream/promises')
 const { t } = require('./desktop-i18n.cjs')
 
-const RELEASE_URL = 'https://api.github.com/repos/zhimaAi/TeamsBoard/releases/latest'
+const RELEASE_URL = 'https://api.github.com/repos/zhimaAi/TeamBuddy/releases/latest'
 const CACHE_TTL_MS = 30 * 60 * 1000
 const MAX_RELEASE_BYTES = 2 * 1024 * 1024
 const ASSET_NAMES = Object.freeze({
-  'win32:x64': 'TeamsBoard-windows-x64.exe',
-  'win32:arm64': 'TeamsBoard-windows-arm64.exe',
-  'darwin:x64': 'TeamsBoard-macos-x64.dmg',
-  'darwin:arm64': 'TeamsBoard-macos-arm64.dmg',
+  'win32:x64': 'TeamBuddy-windows-x64.exe',
+  'win32:arm64': 'TeamBuddy-windows-arm64.exe',
+  'darwin:x64': 'TeamBuddy-macos-x64.dmg',
+  'darwin:arm64': 'TeamBuddy-macos-arm64.dmg',
 })
 
 function parseVersion(value) {
@@ -61,7 +61,7 @@ function validAssetURL(value) {
   try {
     const url = new URL(value)
     return url.protocol === 'https:' && url.hostname === 'github.com' &&
-      url.pathname.toLowerCase().startsWith('/zhimaai/teamsboard/releases/download/')
+      url.pathname.toLowerCase().startsWith('/zhimaai/teambuddy/releases/download/')
   } catch {
     return false
   }
@@ -72,10 +72,14 @@ function assetURLMatchesName(url, name) {
 }
 
 function validRedirectURL(value) {
-  const url = new URL(value)
-  return url.protocol === 'https:' &&
-    (url.hostname === 'github.com' || url.hostname === 'api.github.com' ||
-      url.hostname === 'githubusercontent.com' || url.hostname.endsWith('.githubusercontent.com'))
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' &&
+      (url.hostname === 'github.com' || url.hostname === 'api.github.com' ||
+        url.hostname === 'githubusercontent.com' || url.hostname.endsWith('.githubusercontent.com'))
+  } catch {
+    return false
+  }
 }
 
 function normalizeRelease(raw, platform, arch) {
@@ -237,7 +241,12 @@ class UpdateManager extends EventEmitter {
       } catch { /* 非 JSON 或响应过大时仍保留 HTTP 状态。 */ }
       throw new Error(`GitHub 返回 HTTP ${response.statusCode}${githubMessage ? `：${githubMessage}` : ''}`)
     }
-    const raw = JSON.parse(await readLimited(response, MAX_RELEASE_BYTES))
+    let raw
+    try {
+      raw = JSON.parse(await readLimited(response, MAX_RELEASE_BYTES))
+    } catch (error) {
+      throw new Error(`GitHub Release 响应无效：${errorDetail(error)}`)
+    }
     const release = normalizeRelease(raw, this.platform, this.arch)
     this.cache.release = raw
     this.cache.etag = typeof response.headers.etag === 'string' ? response.headers.etag : ''
