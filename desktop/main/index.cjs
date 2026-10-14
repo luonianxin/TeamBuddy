@@ -3,7 +3,7 @@
 const path = require('node:path')
 const { spawn } = require('node:child_process')
 const { app, dialog, Menu, session, shell, Tray } = require('electron')
-const { APP_TRAY_ICON_PATH, configureAppIdentity } = require('./app-identity.cjs')
+const { APP_TRAY_ICON_PATH, configureAppIdentity, shouldStartInstance } = require('./app-identity.cjs')
 const { BackendSupervisor, resolveBackendLaunch } = require('./backend-supervisor.cjs')
 const { DesktopPreferences } = require('./desktop-preferences.cjs')
 const { setLocale, t } = require('./desktop-i18n.cjs')
@@ -37,7 +37,9 @@ registerProtocolClient({
   execPath: process.execPath,
   argv: process.argv,
 })
-const singleInstance = app.requestSingleInstanceLock()
+// userData 已固定为 TeamBuddy。重复启动必须调用 Electron 单实例锁，已有进程才能收到 second-instance。
+// macOS/Linux 在拿到该锁后，若旧 TeamsBoard 的 SingletonLock 仍指向本机存活进程，则退出且不改旧目录。
+const singleInstance = shouldStartInstance(app.getPath('appData'), () => app.requestSingleInstanceLock())
 
 let mainWindow = null
 let backend = null
@@ -330,8 +332,8 @@ async function startApplication() {
 }
 
 if (!singleInstance) {
-  // requestSingleInstanceLock has already notified the existing process. This
-  // process has no window or sidecar to clean up and should terminate normally.
+  // Electron 锁失败时，requestSingleInstanceLock 已通知先启动的 TeamBuddy。
+  // 旧 TeamsBoard 仍存活时，本进程已拿到新锁但拒绝启动 sidecar，避免两套进程同时碰数据。
   app.quit()
 } else {
   app.whenReady().then(() => {

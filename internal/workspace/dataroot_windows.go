@@ -3,6 +3,7 @@
 package workspace
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,6 +101,10 @@ func existingAncestor(p string) string {
 		}
 		p = parent
 	}
+}
+
+func isCrossDevice(err error) bool {
+	return errors.Is(err, windows.ERROR_NOT_SAME_DEVICE)
 }
 
 // canonicalizeWindowsTarget 在检测到目标路径的盘符与

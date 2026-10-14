@@ -429,7 +429,8 @@
     "other": "目标目录不能位于系统目录之下"
   },
   "configcenter_workspace_target_has_data": {
-    "other": "目标目录下已存在 .goteams 数据，为避免覆盖请另选空目录"
+    "description": "DirName 是当前数据根目录名，新安装为 .teambuddy，旧安装为 .goteams。",
+    "other": "目标目录下已存在 {{.DirName}} 数据，为避免覆盖请另选空目录"
   },
   "configcenter_database_lookup_failed": {
     "other": "读取数据库配置失败"

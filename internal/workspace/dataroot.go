@@ -1,10 +1,13 @@
 // Package workspace 管理工作空间（数据根）的解析与重定位。
 //
-// 数据根默认是 <HOME>/.goteams。桌面端用户在配置中心选择新的父目录后，
-// 搬迁流程把整个 .goteams 目录搬到 <新父目录>/.goteams，并在 HOME 下长期保留
-// .goteams.mlink 指针文件记录真实位置；之后每次启动由 ResolveDataRoot 解析
-// 指针回到真实数据根。因为整个数据根（含数据库）一起搬迁，数据库里的绝对路径
-// 在新位置保持成立；Windows 换盘符场景在启动时按卷序列号把指针与历史路径
+// 数据根默认是 <HOME>/.teambuddy。启动时如果只有旧的 <HOME>/.goteams 或 .goteams.mlink，
+// 会把 HOME 下旧数据根整树复制到新目录并切换；旧目录和旧指针都原样保留。
+// 外部自定义目录保持原位置与原名，新指针指向同一位置；旧根内部的指针目标前缀映射到新根，
+// 内层目录名不变。复制或校验失败时启动失败，不创建空库、不回退旧数据。
+// 桌面端用户在配置中心选择新的父目录后，搬迁流程把整个数据根
+// 搬到 <新父目录>/<当前目录名>，并在 HOME 下长期保留对应指针文件；之后每次启动由
+// ResolveDataRoot 解析指针回到真实数据根。因为整个数据根（含数据库）一起搬迁，数据库里的
+// 绝对路径在新位置保持成立；Windows 换盘符场景在启动时按卷序列号把指针与历史路径
 // 归一到真实盘符。
 package workspace
 
@@ -16,45 +19,154 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"goteams-client/internal/applog"
 )
 
 const (
-	// dataRootDirName 是数据根目录名；新父目录下同样以该名字创建。
-	dataRootDirName = ".goteams"
-	// dataRootLinkFileName 是 HOME 下记录重定位目标的指针文件名。
-	// 指针文件搬迁成功后长期保留，是「该用户曾经迁移过工作空间」的唯一事实源：
-	// 换盘符、系统重装后只要用户目录还在，启动即可找回真实数据根。
-	dataRootLinkFileName = ".goteams.mlink"
-	// dataRootSentinelName 是数据根结构标记文件名。只有带此标记的目录才被认为
-	// 是完整可用的数据根；它让启动逻辑能区分「完整数据」与「搬迁残留的空壳」，
-	// 也能在「原父目录出现同名新用户」时避免误用别人的数据目录。
-	dataRootSentinelName = ".goteams-root"
+	// 旧安装使用这一套名字。新方案生效前继续读取它。
+	legacyDataRootDirName      = ".goteams"
+	legacyDataRootLinkFileName = ".goteams.mlink"
+	legacyDataRootSentinelName = ".goteams-root"
+
+	// 新安装和已完成复制切换的安装使用这一套名字。
+	currentDataRootDirName      = ".teambuddy"
+	currentDataRootLinkFileName = ".teambuddy.mlink"
+	currentDataRootSentinelName = ".teambuddy-root"
 )
 
-// ErrWorkspaceConflict 表示目标父目录下已存在 .goteams 目录（禁止合并）。
-var ErrWorkspaceConflict = errors.New("目标父目录下已存在 .goteams 目录")
-
-// DefaultDataRoot 返回当前平台的默认数据根路径（真实 HOME/.goteams）。
-func DefaultDataRoot() string {
-	return filepath.Join(realHomeDir(), dataRootDirName)
+// rootScheme 是一套数据根目录名、指针文件名和结构标记名。
+type rootScheme struct {
+	dirName      string
+	linkFileName string
+	sentinelName string
 }
 
-// LinkFilePath 返回 HOME 下指针文件的路径（错误提示与排障时使用）。
+func legacyRootScheme() rootScheme {
+	return rootScheme{
+		dirName:      legacyDataRootDirName,
+		linkFileName: legacyDataRootLinkFileName,
+		sentinelName: legacyDataRootSentinelName,
+	}
+}
+
+func currentRootScheme() rootScheme {
+	return rootScheme{
+		dirName:      currentDataRootDirName,
+		linkFileName: currentDataRootLinkFileName,
+		sentinelName: currentDataRootSentinelName,
+	}
+}
+
+// activeScheme 选择当前用户的数据根方案。新指针、新库或新结构标记存在即使用 .teambuddy；
+// runtime.json 不参与判定。新旧数据同时存在时新数据优先。
+// 同一 HOME 在本次进程内只判断一次；复制切换成功后必须 invalidate，避免继续使用旧方案。
+func activeScheme() rootScheme {
+	home := realHomeDir()
+	schemeMu.Lock()
+	defer schemeMu.Unlock()
+	if schemeReady && schemeHome == home {
+		return schemeValue
+	}
+	schemeHome = home
+	schemeValue = detectScheme(home)
+	schemeReady = true
+	return schemeValue
+}
+
+func detectScheme(home string) rootScheme {
+	if currentSchemeReady(home) {
+		return currentRootScheme()
+	}
+	oldRoot := filepath.Join(home, legacyDataRootDirName)
+	oldLink := filepath.Join(home, legacyDataRootLinkFileName)
+	if pathExists(oldLink) || pathExists(oldRoot) {
+		return legacyRootScheme()
+	}
+	return currentRootScheme()
+}
+
+func directoryHasManagedData(root string) bool {
+	for _, name := range []string{"base.db", "goteams.db"} {
+		if pathExists(filepath.Join(root, "data", name)) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	schemeMu    sync.Mutex
+	schemeHome  string
+	schemeValue rootScheme
+	schemeReady bool
+)
+
+func pathExists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
+func dataRootDirName() string { return activeScheme().dirName }
+
+func dataRootLinkFileName() string { return activeScheme().linkFileName }
+
+// DataRootDirName 返回当前用户生效的数据根目录名。
+func DataRootDirName() string { return dataRootDirName() }
+
+func sentinelNameForRoot(root string) string {
+	base := filepath.Base(filepath.Clean(root))
+	if strings.EqualFold(base, legacyDataRootDirName) {
+		return legacyDataRootSentinelName
+	}
+	if strings.EqualFold(base, currentDataRootDirName) {
+		return currentDataRootSentinelName
+	}
+	return activeScheme().sentinelName
+}
+
+// ErrWorkspaceConflict 表示目标父目录下已存在数据根目录（禁止合并）。
+var ErrWorkspaceConflict = errors.New("目标父目录下已存在数据目录")
+
+// DefaultDataRoot 返回当前用户的默认数据根路径。
+// 新安装和复制切换完成后是 HOME/.teambuddy；切换前仍为 HOME/.goteams。
+func DefaultDataRoot() string {
+	return filepath.Join(realHomeDir(), dataRootDirName())
+}
+
+// LinkFilePath 返回 HOME 下当前方案指针文件的路径（错误提示与排障时使用）。
 func LinkFilePath() string {
-	return filepath.Join(realHomeDir(), dataRootLinkFileName)
+	return filepath.Join(realHomeDir(), dataRootLinkFileName())
+}
+
+func readLinkTarget(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	target := filepath.Clean(strings.TrimSpace(string(data)))
+	if target == "" || target == "." {
+		return "", false
+	}
+	return target, true
 }
 
 // ResolveDataRoot 在启动早期解析数据根：
-//  1. HOME 下无指针文件 → 使用并确保默认根存在；
-//  2. 有指针文件 → Windows 下先按卷序列号归一盘符（换盘符自愈），再校验目标
-//     合法性；目标不可用时，默认根完整则回退默认根，否则返回带排障指引的错误。
+//  1. 先完成旧方案复制切换；失败则返回错误，不创建空库、不使用旧数据。
+//  2. HOME 下无当前方案指针文件 → 使用并确保默认根存在。
+//  3. 有指针文件 → 必须是绝对路径、真实目录且不是符号链接；Windows 下先按卷序列号
+//     归一盘符。目标不可用时返回明确错误，不回退默认根或旧数据。
+//     指针可以指向默认根本身（绝对路径且结构/数据校验通过）。
 func ResolveDataRoot() (string, error) {
 	home := realHomeDir()
-	defaultRoot := filepath.Join(home, dataRootDirName)
-	linkPath := filepath.Join(home, dataRootLinkFileName)
+	if err := ensureMigrated(home); err != nil {
+		return "", err
+	}
+	scheme := activeScheme()
+	defaultRoot := filepath.Join(home, scheme.dirName)
+	linkPath := filepath.Join(home, scheme.linkFileName)
 
 	data, err := os.ReadFile(linkPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -66,17 +178,16 @@ func ResolveDataRoot() (string, error) {
 
 	target := strings.TrimSpace(string(data))
 	if target == "" {
-		applog.Warn("工作空间指针文件为空，使用默认数据根", "link", linkPath)
-		return defaultRoot, os.MkdirAll(defaultRoot, 0o755)
+		return "", fmt.Errorf("工作空间指针文件为空，拒绝创建空数据根（指针: %s）", linkPath)
+	}
+	if !filepath.IsAbs(target) {
+		return "", fmt.Errorf("工作空间指针不是绝对路径: %q（指针: %s）", target, linkPath)
 	}
 	target = filepath.Clean(target)
 
-	// Windows 盘符互换后（例如系统盘从 C 变成 D、数据盘变成 C），指针里记录的
-	// 仍是搬迁时的盘符。先按卷序列号把目标归一到真实盘符并回写指针，
-	// 之后的校验与使用都基于归一后的路径。
 	if runtime.GOOS == "windows" {
 		if canonical, changed := canonicalizeWindowsTarget(target); changed {
-			if dirLooksComplete(canonical) {
+			if pointerTargetUsable(canonical) {
 				if writeErr := os.WriteFile(linkPath, []byte(canonical), 0o600); writeErr != nil {
 					applog.Warn("重写工作空间指针失败", "link", linkPath, "error", writeErr.Error())
 				} else {
@@ -90,58 +201,65 @@ func ResolveDataRoot() (string, error) {
 		}
 	}
 
-	if err := validateRelocatedTarget(home, defaultRoot, target); err != nil {
-		if dirLooksComplete(defaultRoot) {
-			applog.Warn("工作空间指针目标不可用，回退默认数据根",
-				"target", target, "reason", err.Error())
-			return defaultRoot, nil
-		}
-		return "", fmt.Errorf("工作空间目录不可用：%w（默认目录下没有完整数据，无法回退；请检查磁盘连接后重启，或删除 %s 恢复默认工作空间）", err, linkPath)
+	if err := validatePointerTarget(home, defaultRoot, target); err != nil {
+		return "", fmt.Errorf("工作空间目录不可用：%w（不会改用其他数据目录；请检查磁盘连接后重启，或修复 %s）", err, linkPath)
 	}
 
 	return target, nil
 }
 
-// validateRelocatedTarget 校验指针目标目录：
-//   - Windows 下目标的卷必须存在且就是 HOME 当前所在卷（换盘符已在调用方归一，
-//     走到这里仍不一致说明数据真的在丢失的盘上）；
-//   - 目标必须位于该卷的某个用户目录之下（防止指向系统/程序目录）；
-//   - 目标必须带结构标记，即看起来是完整的数据根。
-func validateRelocatedTarget(home, defaultRoot, target string) error {
-	if samePath(target, defaultRoot) || target == filepath.Dir(defaultRoot) {
-		return fmt.Errorf("目标 %s 不是有效的重定位目录", target)
+// validatePointerTarget 校验指针目标目录：
+//   - 目标必须是绝对路径下的真实目录，不能是符号链接；
+//   - Windows 下目标卷必须能读到（盘已拔出则失败）；换盘符仍由 canonicalizeWindowsTarget 按卷序列号归一。
+//     跨卷搬迁是允许的，不能因为和 HOME 不同卷就把已存在的数据根判丢。
+//   - 目标必须位于某个用户目录之下（防止指向系统/程序目录）；
+//   - 目标必须带结构标记或受管数据库；可以等于默认根。
+func validatePointerTarget(_, defaultRoot, target string) error {
+	if samePath(target, filepath.Dir(defaultRoot)) {
+		return fmt.Errorf("目标 %s 不能是用户主目录本身", target)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		return fmt.Errorf("目标目录不可读: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("目标 %s 是符号链接，拒绝跟随", target)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("目标 %s 不是目录", target)
 	}
 	if runtime.GOOS == "windows" {
-		homeSerial, err := volumeSerialNumber(home)
-		if err != nil {
-			return fmt.Errorf("读取用户目录所在卷失败: %w", err)
-		}
-		targetSerial, err := volumeSerialNumber(target)
-		if err != nil {
+		if _, err := volumeSerialNumber(target); err != nil {
 			return fmt.Errorf("目标目录所在卷不可用: %w", err)
-		}
-		if homeSerial != targetSerial {
-			return fmt.Errorf("目标目录与用户目录不在同一卷，目标 %s", target)
 		}
 		if !isUnderUserHome(target) {
 			return fmt.Errorf("目标目录 %s 不在任何用户目录下", target)
 		}
 	}
-	if !dirLooksComplete(target) {
-		return fmt.Errorf("目标目录 %s 缺少完整的工作空间结构", target)
+	if !pointerTargetUsable(target) {
+		return fmt.Errorf("目标目录 %s 缺少完整的工作空间结构或数据", target)
 	}
 	return nil
 }
 
+func pointerTargetUsable(dir string) bool {
+	return dirLooksComplete(dir) || directoryHasManagedData(dir)
+}
+
 // dirLooksComplete 判断目录是否是已建立结构的数据根（存在结构标记文件）。
 func dirLooksComplete(dir string) bool {
-	info, err := os.Stat(filepath.Join(dir, dataRootSentinelName))
-	return err == nil && info.Mode().IsRegular()
+	for _, name := range []string{legacyDataRootSentinelName, currentDataRootSentinelName} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err == nil && info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
 }
 
 // MarkDataRootStructure 建立数据根结构标记。首次初始化和搬迁后都会调用。
 func MarkDataRootStructure(root string) error {
-	marker := filepath.Join(root, dataRootSentinelName)
+	marker := filepath.Join(root, sentinelNameForRoot(root))
 	content := "goteams data root\n" + time.Now().Format(time.RFC3339) + "\n"
 	if err := os.WriteFile(marker, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("写入工作空间结构标记失败: %w", err)
@@ -162,12 +280,26 @@ func samePath(a, b string) bool {
 // isUnderUserHome 判断路径是否位于某用户目录之内（Windows: <卷>:\Users\<name>\...）。
 // 用于阻止把工作空间指到系统盘根目录或 Program Files 等位置。
 func isUnderUserHome(p string) bool {
-	parts := strings.Split(strings.ToUpper(filepath.Clean(p)), string(filepath.Separator))
-	// Windows 绝对路径形态: ["", "C:", "USERS", "<name>", ...]
-	if len(parts) >= 5 && parts[2] == "USERS" && parts[3] != "" {
-		return true
+	if runtime.GOOS == "windows" {
+		p = filepath.Clean(p)
 	}
-	return false
+	return windowsPathUnderUserHome(p)
+}
+
+// windowsPathUnderUserHome 识别 Windows 用户目录。filepath.Clean 在 Windows 上得到
+// ["C:", "USERS", "<name>", ...]，不能按带前导空段的 Unix 形态判断，否则已搬迁的数据根
+// 会被拒绝，启动回退到空壳目录。
+func windowsPathUnderUserHome(p string) bool {
+	p = strings.ReplaceAll(strings.TrimSpace(p), "/", `\`)
+	for strings.Contains(p, `\\`) {
+		p = strings.ReplaceAll(p, `\\`, `\`)
+	}
+	p = strings.TrimSuffix(p, `\`)
+	parts := strings.Split(strings.ToUpper(p), `\`)
+	if len(parts) > 0 && parts[0] == "" {
+		parts = parts[1:]
+	}
+	return len(parts) >= 4 && strings.HasSuffix(parts[0], ":") && parts[1] == "USERS" && parts[2] != ""
 }
 
 // copyDirTree 递归复制目录；遇到符号链接按链接本身复制（不跟随），
@@ -238,7 +370,7 @@ func pathDepth(p string) int {
 	return strings.Count(p, string(filepath.Separator))
 }
 
-// relocateDataRoot 把源数据根搬迁到 dstParent/.goteams。
+// relocateDataRoot 把源数据根搬迁到 dstParent/<当前数据根目录名>。
 // 调用方需已完成所有前置校验；函数保证：
 //  1. 同卷优先 rename（原子），跨卷复制后删除；
 //  2. 任何中途失败都尽量回滚，源目录保持可用。
@@ -246,7 +378,7 @@ func pathDepth(p string) int {
 // 注意：搬迁成功后调用方必须立刻写指针文件；两条语句之间进程被杀的极端窗口
 // 由启动日志与指针校验兜底（数据完整保留在新目录，可手工恢复指针）。
 func relocateDataRoot(srcRoot, dstParent string) (newRoot string, err error) {
-	newRoot = filepath.Join(dstParent, dataRootDirName)
+	newRoot = filepath.Join(dstParent, dataRootDirName())
 
 	moved := false
 	defer func() {

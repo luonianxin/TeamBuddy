@@ -429,7 +429,8 @@
     "other": "The target directory cannot be inside a system directory"
   },
   "configcenter_workspace_target_has_data": {
-    "other": "A .goteams directory already exists under the target; choose an empty directory to avoid overwriting"
+    "description": "DirName is the active data-root directory name: .teambuddy for a new install, .goteams for an existing one.",
+    "other": "A {{.DirName}} directory already exists under the target; choose an empty directory to avoid overwriting"
   },
   "configcenter_database_lookup_failed": {
     "other": "Failed to read database configuration"

@@ -73,10 +73,10 @@ TeamBuddy 提供Windows(x64/arm)、Mac os(x64/arm）安装包，可以直接下�
 
 | 平台          | 安装包                                                       |
 | ------------- | ------------------------------------------------------------ |
-| Windows x64   | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-windows-x64.exe) |
-| Windows arm64 | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-windows-arm64.exe) |
-| Mac os x64    | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-macos-x64.dmg) |
-| Mac os arm    | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamsBoard-macos-arm64.dmg) |
+| Windows x64   | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamBuddy-windows-x64.exe) |
+| Windows arm64 | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamBuddy-windows-arm64.exe) |
+| Mac os x64    | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamBuddy-macos-x64.dmg) |
+| Mac os arm    | [下载]( https://github.com/zhimaAi/TeamBuddy/releases/latest/download/TeamBuddy-macos-arm64.dmg) |
 
 ### 2、创建流水线，绑定本地cli
 
