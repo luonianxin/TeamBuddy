@@ -10,6 +10,7 @@ export interface RequestOptions {
   body?: unknown
   headers?: Record<string, string>
   params?: Record<string, string | number | boolean | undefined>
+  signal?: AbortSignal
 }
 
 export interface ApiResponse<T = unknown> {
@@ -82,7 +83,7 @@ function getLanguageContext(response: Response, requestLocale: AppLocale) {
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : undefined
 }
 
@@ -94,19 +95,14 @@ function readCode(value: unknown): number | string | undefined {
   return typeof value === 'number' || typeof value === 'string' ? value : undefined
 }
 
-function emitWarning(
-  warning: unknown,
-  language: ReturnType<typeof getLanguageContext>,
-) {
+function emitWarning(warning: unknown, language: ReturnType<typeof getLanguageContext>) {
   const message = readMessage(warning)
   if (!message || !apiFeedbackHandler) return
 
   try {
     apiFeedbackHandler({
       kind: 'warning',
-      message: language.staleLocale
-        ? t('common.feedback.completedAfterLanguageChange')
-        : message,
+      message: language.staleLocale ? t('common.feedback.completedAfterLanguageChange') : message,
       ...language,
     })
   } catch {
@@ -149,11 +145,8 @@ function buildUrl(path: string, params?: RequestOptions['params']): string {
   return qs ? `${url}?${qs}` : url
 }
 
-export async function request<T = unknown>(
-  path: string,
-  options: RequestOptions = {},
-): Promise<T> {
-  const { method = 'GET', body, headers = {}, params } = options
+export async function request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { method = 'GET', body, headers = {}, params, signal } = options
 
   const url = buildUrl(path, params)
   console.log('[api] ' + method + ' ' + url)
@@ -175,6 +168,7 @@ export async function request<T = unknown>(
     headers: finalHeaders,
     body: body ? (isFormData ? body : JSON.stringify(body)) : undefined,
     credentials: 'same-origin',
+    signal,
     // 会话接口必须拿到实时状态；Electron 磁盘缓存曾缓存过本地后端的过期响应
     //（如 index.html），命中后请求根本不发出，导致登录态判断永远错误。
     cache: 'no-store',
@@ -232,10 +226,7 @@ async function requestBlob(path: string, params?: RequestOptions['params']): Pro
 }
 
 // 后端重启后 token 会失效（dev 模式常见）：收到 403 时清除缓存、重取 token 并重试一次。
-async function fetchWithTokenRetry(
-  url: string,
-  init: RequestInit,
-): Promise<Response> {
+async function fetchWithTokenRetry(url: string, init: RequestInit): Promise<Response> {
   let response = await fetch(url, init)
   const sentToken = (init.headers as Record<string, string>)['X-GoTeams-Api-Token']
   if (response.status !== 403 || !sentToken) return response
@@ -251,16 +242,14 @@ async function fetchWithTokenRetry(
 }
 
 export const apiClient = {
-  get: <T = unknown>(path: string, params?: RequestOptions['params']) =>
-    request<T>(path, { method: 'GET', params }),
+  get: <T = unknown>(path: string, params?: RequestOptions['params'], signal?: AbortSignal) =>
+    request<T>(path, { method: 'GET', params, signal }),
 
   getBlob: (path: string, params?: RequestOptions['params']) => requestBlob(path, params),
 
-  post: <T = unknown>(path: string, body?: unknown) =>
-    request<T>(path, { method: 'POST', body }),
+  post: <T = unknown>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body }),
 
-  put: <T = unknown>(path: string, body?: unknown) =>
-    request<T>(path, { method: 'PUT', body }),
+  put: <T = unknown>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body }),
 
   delete: <T = unknown>(path: string, body?: unknown) =>
     request<T>(path, { method: 'DELETE', body }),
