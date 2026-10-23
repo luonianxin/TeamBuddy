@@ -1,12 +1,40 @@
 <template>
   <NewConversation v-if="isNewConversation" />
-  <div v-else class="task-page">
+  <div
+    v-else
+    class="task-page"
+  >
     <header class="page-titlebar">
       <div class="page-titlebar-copy">
         <strong>{{ t('workflows.task.common.conversation') }}</strong>
         <p>{{ t('workflows.task.notifications.subtitle') }}</p>
       </div>
       <div class="page-titlebar-actions">
+        <a-tooltip
+          v-if="selectedTaskUuid"
+          :title="
+            workspaceOpen
+              ? t('workflows.task.workspaceFiles.collapse')
+              : t('workflows.task.workspaceFiles.open')
+          "
+          placement="bottomRight"
+        >
+          <button
+            type="button"
+            class="overview-toggle-button"
+            :class="{ active: workspaceOpen }"
+            :aria-label="
+              workspaceOpen
+                ? t('workflows.task.workspaceFiles.collapse')
+                : t('workflows.task.workspaceFiles.open')
+            "
+            :aria-expanded="workspaceOpen"
+            aria-controls="task-workspace-panel"
+            @click="toggleWorkspace"
+          >
+            <FolderOpenOutlined />
+          </button>
+        </a-tooltip>
         <a-tooltip
           :title="
             pipelineExpanded
@@ -72,9 +100,22 @@
           </div>
         </div>
         <div class="task-step-region">
-		  <div v-if="isExpertGroup" class="expert-overview"><strong>{{ task.expert_group_name_snapshot }}</strong><span>{{ `${t('expertGroups.leader')}：${sortedSteps.find(step => step.member_role === 'leader')?.name || ''}` }}</span><span>{{ t('expertGroups.members', { count: sortedSteps.filter(step => step.member_role === 'member').length }) }}</span></div>
+          <div
+            v-if="isExpertGroup"
+            class="expert-overview"
+          >
+            <strong>{{ task.expert_group_name_snapshot }}</strong
+            ><span>{{
+              `${t('expertGroups.leader')}：${sortedSteps.find((step) => step.member_role === 'leader')?.name || ''}`
+            }}</span
+            ><span>{{
+              t('expertGroups.members', {
+                count: sortedSteps.filter((step) => step.member_role === 'member').length,
+              })
+            }}</span>
+          </div>
           <AgentStepStrip
-			v-else-if="hasPipelineSnapshot"
+            v-else-if="hasPipelineSnapshot"
             :steps="sortedSteps"
             :current-step-index="currentStepIndex"
             :current-step-uuid="effectiveCurrentStepUuid"
@@ -139,6 +180,7 @@
     <div
       ref="taskLayoutRef"
       class="task-layout"
+      :class="{ 'is-resizing-workspace': workspaceResizing }"
     >
       <main
         class="conversation-main"
@@ -151,7 +193,10 @@
         >
           <div class="archived-banner-text">
             <span class="archived-badge">{{ t('layout.sidebar.archived') || '已归档' }}</span>
-            <span>{{ t('workflows.task.notifications.archivedTip') || '可继续发送消息，发送后自动取消归档。' }}</span>
+            <span>{{
+              t('workflows.task.notifications.archivedTip') ||
+              '可继续发送消息，发送后自动取消归档。'
+            }}</span>
           </div>
           <button
             type="button"
@@ -191,9 +236,11 @@
               <div class="composer-loading-body" />
             </div>
           </div>
-		  <template v-else-if="task && (hasPipelineSnapshot || isVibeCoding || isExpertGroup || isCLI)">
-			<NextStepButton
-			  v-if="!isVibeCoding && !isExpertGroup && !isCLI && showNextStepCard"
+          <template
+            v-else-if="task && (hasPipelineSnapshot || isVibeCoding || isExpertGroup || isCLI)"
+          >
+            <NextStepButton
+              v-if="!isVibeCoding && !isExpertGroup && !isCLI && showNextStepCard"
               :next-step-name="nextStepName"
               :is-last-step="isLastStep"
               :disabled="!canComplete"
@@ -221,12 +268,12 @@
                 :revision="task.updated_at"
               />
               <StepMessageList
-				:items="isVibeCoding ? progress : selectedProgress"
-				:steps="isVibeCoding ? [] : sortedSteps"
+                :items="isVibeCoding ? progress : selectedProgress"
+                :steps="isVibeCoding ? [] : sortedSteps"
                 :highlight-uuid="highlightUuid"
-				:selected-step-name="isVibeCoding ? vibeCodingToolName : selectedStep?.name || ''"
-				:fallback-actor-name="isVibeCoding ? vibeCodingToolName : ''"
-				:fallback-actor-logo="isVibeCoding ? vibeCodingActorLogo : ''"
+                :selected-step-name="isVibeCoding ? vibeCodingToolName : selectedStep?.name || ''"
+                :fallback-actor-name="isVibeCoding ? vibeCodingToolName : ''"
+                :fallback-actor-logo="isVibeCoding ? vibeCodingActorLogo : ''"
                 :task-uuid="selectedTaskUuid"
                 @copy="copyResult"
               />
@@ -240,7 +287,7 @@
               @open="handleOpenVibeTool"
             />
             <ChatComposer
-			  v-else
+              v-else
               ref="composerRef"
               v-model="question"
               :can-ask="canAsk"
@@ -253,13 +300,13 @@
               :placeholder="composerPlaceholder"
               :context-text="composerContextText"
               :task-uuid="selectedTaskUuid"
-			  :current-step="isExpertGroup ? undefined : selectedStep"
-			  :document-step="isExpertGroup ? currentStep : selectedStep"
+              :current-step="isExpertGroup ? undefined : selectedStep"
+              :document-step="isExpertGroup ? currentStep : selectedStep"
               :steps="sortedSteps"
-			  :expert-members="isExpertGroup ? sortedSteps : []"
+              :expert-members="isExpertGroup ? sortedSteps : []"
               :executing-step-uuid="effectiveCurrentStepUuid"
               :hide-agent-prompt="isCLI"
-			  @submit="isExpertGroup ? submitExpertMessage($event) : submitQuestion($event)"
+              @submit="isExpertGroup ? submitExpertMessage($event) : submitQuestion($event)"
               @stop="stopSelectedConversation"
               @prompt-saved="loadSelectedTask"
             />
@@ -295,6 +342,29 @@
           <p>{{ t('workflows.task.notifications.emptyDescription') }}</p>
         </div>
       </main>
+      <aside
+        v-if="workspaceOpen && selectedTaskUuid"
+        id="task-workspace-panel"
+        class="workspace-pane"
+        :style="{ width: `${workspaceWidth}px`, flexBasis: `${workspaceWidth}px` }"
+      >
+        <div
+          class="workspace-resize-handle"
+          role="separator"
+          tabindex="0"
+          aria-orientation="vertical"
+          :aria-label="t('workflows.task.workspaceFiles.resize')"
+          :aria-valuemin="260"
+          :aria-valuemax="480"
+          :aria-valuenow="workspaceWidth"
+          @pointerdown="startWorkspaceResize"
+          @keydown="resizeWorkspaceWithKeyboard"
+        />
+        <WorkspaceFilePanel
+          :task-uuid="selectedTaskUuid"
+          @close="closeWorkspace"
+        />
+      </aside>
     </div>
 
     <div
@@ -375,6 +445,7 @@ import { readComposerDraft, writeComposerDraft } from '@/composables/useComposer
 import {
   CheckCircleOutlined,
   CodeOutlined,
+  FolderOpenOutlined,
   FolderOutlined,
   ReloadOutlined,
 } from '@ant-design/icons-vue'
@@ -394,20 +465,15 @@ import StepMessageList from '@/components/task-progress/StepMessageList.vue'
 import StopExecutionConfirmModal from '@/components/task-progress/StopExecutionConfirmModal.vue'
 import TaskExecutionHistory from '@/components/task-progress/TaskExecutionHistory.vue'
 import VibeCodingConversationNotice from '@/components/task-progress/VibeCodingConversationNotice.vue'
+import WorkspaceFilePanel from '@/components/workspace/WorkspaceFilePanel.vue'
 import { copyText } from '@/utils/clipboard'
 import { isStopConfirmSuppressed, suppressStopConfirm } from '@/utils/stopConfirm'
 import { openTerminal } from '@/composables/useDesktop'
-import {
-  openTaskInCodex,
-} from '@/composables/useTaskCodex'
+import { openTaskInCodex } from '@/composables/useTaskCodex'
 import { useLocalWS, useLocalWSStatus } from '@/composables/useLocalWebSocket'
 import { buildCliKickoffPrompt, pendingCliKickoffUuid } from '@/composables/useCliKickoff'
 import { useAppStore } from '@/stores/app'
-import type {
-  CompleteStepResponse,
-  TaskNotification,
-  TaskProgress,
-} from '@/types/pipeline'
+import type { CompleteStepResponse, TaskNotification, TaskProgress } from '@/types/pipeline'
 import type { ChatComposerSubmission } from '@/types/task-attachments'
 import { isUserMessage, resultText, userMessageText } from '@/components/task-progress/utils'
 import type { TaskWithDetails } from '@/types/task-detail'
@@ -453,8 +519,12 @@ const notificationsLoading = ref(false)
 const notificationsError = ref('')
 const notifications = ref<TaskNotification[]>([])
 const temporaryNotifications = ref<TaskNotification[]>([])
-watch(() => [...notifications.value, ...temporaryNotifications.value].filter((item) => !item.is_read).length,
-  (count) => appStore.setUnreadTaskNotifications(count))
+watch(
+  () =>
+    [...notifications.value, ...temporaryNotifications.value].filter((item) => !item.is_read)
+      .length,
+  (count) => appStore.setUnreadTaskNotifications(count),
+)
 const pendingReadTasks = new Map<string, { isRead: boolean; notificationUuids: Set<string> }>()
 const selectedTaskUuid = ref('')
 const selectedStepUuid = ref('')
@@ -485,6 +555,13 @@ const pipelineExpanded = ref(true)
 const openingTerminal = ref(false)
 const codexBusy = ref(false)
 const taskLayoutRef = ref<HTMLElement>()
+const workspaceOpen = ref(localStorage.getItem('teambuddy.workspace-panel.open') !== 'false')
+const workspaceWidth = ref(
+  clampWorkspaceWidth(Number(localStorage.getItem('teambuddy.workspace-panel.width')) || 300),
+)
+const workspaceResizing = ref(false)
+let workspaceResizeStartX = 0
+let workspaceResizeStartWidth = 300
 
 const contextTaskUuid = ref('')
 const contextX = ref(0)
@@ -560,14 +637,13 @@ const sortedSteps = computed(() =>
   [...(task.value?.steps || [])].sort((a, b) => a.sort_order - b.sort_order),
 )
 const hasPipelineSnapshot = computed(() =>
-	Boolean(task.value?.execution_mode === 'pipeline' && (task.value?.pipeline_snapshot_uuid || sortedSteps.value.length)),
+  Boolean(
+    task.value?.execution_mode === 'pipeline' &&
+    (task.value?.pipeline_snapshot_uuid || sortedSteps.value.length),
+  ),
 )
-const isVibeCoding = computed(
-  () => task.value?.execution_mode === 'vibe_coding',
-)
-const vibeCodingToolName = computed(() =>
-  t(vibeToolLabelKey(task.value?.execution_tool || '')),
-)
+const isVibeCoding = computed(() => task.value?.execution_mode === 'vibe_coding')
+const vibeCodingToolName = computed(() => t(vibeToolLabelKey(task.value?.execution_tool || '')))
 const vibeCodingActorLogo = computed(() => vibeToolLogo(task.value?.execution_tool || ''))
 const isExpertGroup = computed(() => task.value?.execution_mode === 'expert_group')
 // 需求 2204：CLI 直接执行没有流水线与多 Agent，对话页也要能展示该任务的动态与输入框。
@@ -599,7 +675,9 @@ const selectedStepIndex = computed(() =>
   sortedSteps.value.findIndex((step) => step.uuid === selectedStepUuid.value),
 )
 const selectedProgress = computed(() =>
-	isExpertGroup.value ? progress.value : progress.value.filter((item) => item.task_step_uuid === selectedStepUuid.value),
+  isExpertGroup.value
+    ? progress.value
+    : progress.value.filter((item) => item.task_step_uuid === selectedStepUuid.value),
 )
 const latestSelectedAgentProgress = computed(() =>
   [...selectedProgress.value].reverse().find((item) => !isUserMessage(item)),
@@ -644,7 +722,10 @@ const currentStepLocked = computed(
     currentStep.value?.status === 'completed',
 )
 const canAsk = computed(
-	() => !taskLoading.value && (isExpertGroup.value || selectedStepReached.value) && !hasRunningSelectedConversation.value,
+  () =>
+    !taskLoading.value &&
+    (isExpertGroup.value || selectedStepReached.value) &&
+    !hasRunningSelectedConversation.value,
 )
 const selectedStepAwaitingStart = computed(
   () =>
@@ -850,7 +931,8 @@ async function selectConversationFromRoute() {
   }
   selectedTaskUuid.value = conversation.task_uuid
   selectedStepUuid.value = nextStepUuid
-  selectedProgressUuid.value = kickoffThisTask || routeStepUuid ? '' : conversation.latest.progress_uuid || ''
+  selectedProgressUuid.value =
+    kickoffThisTask || routeStepUuid ? '' : conversation.latest.progress_uuid || ''
   closeContextMenu()
   void persistViewState()
   await loadSelectedTask()
@@ -1092,13 +1174,13 @@ async function loadNotifications(preserveSelection = true) {
     const routeTaskUuid = routeQueryValue(route.query.taskUuid)
     const routeStepUuid = routeQueryValue(route.query.stepUuid)
     const routeConversation = conversations.value.find((item) => item.task_uuid === routeTaskUuid)
-	if (routeConversation) {
+    if (routeConversation) {
       selectedTaskUuid.value = routeConversation.task_uuid
       selectedStepUuid.value = routeStepUuid || routeConversation.latest.task_step_uuid
       selectedProgressUuid.value = routeStepUuid ? '' : routeConversation.latest.progress_uuid || ''
     } else if (
-      (!preserveSelection ||
-        !conversations.value.some((item) => item.task_uuid === selectedTaskUuid.value))
+      !preserveSelection ||
+      !conversations.value.some((item) => item.task_uuid === selectedTaskUuid.value)
     ) {
       if (routeTaskUuid) {
         const first = conversations.value[0]
@@ -1223,7 +1305,9 @@ async function setTaskRead(taskUuid: string, isRead: boolean) {
   if (!conversation || pendingReadTasks.has(taskUuid)) return
   const previous = new Map(conversation.items.map((item) => [item.uuid, item.is_read]))
   pendingReadTasks.set(taskUuid, { isRead, notificationUuids: new Set(previous.keys()) })
-  conversation.items.forEach((item) => { item.is_read = isRead })
+  conversation.items.forEach((item) => {
+    item.is_read = isRead
+  })
   try {
     await conversationStore.setTaskRead(taskUuid, isRead)
   } catch (error) {
@@ -1416,11 +1500,68 @@ function togglePipelineExpanded() {
   void persistViewState()
 }
 
+function clampWorkspaceWidth(width: number) {
+  return Math.min(480, Math.max(260, Math.round(width)))
+}
+
+function toggleWorkspace() {
+  workspaceOpen.value = !workspaceOpen.value
+  localStorage.setItem('teambuddy.workspace-panel.open', String(workspaceOpen.value))
+}
+
+function closeWorkspace() {
+  workspaceOpen.value = false
+  localStorage.setItem('teambuddy.workspace-panel.open', 'false')
+}
+
+function startWorkspaceResize(event: PointerEvent) {
+  if (event.button !== 0 || window.matchMedia('(max-width: 1000px)').matches) return
+  event.preventDefault()
+  workspaceResizing.value = true
+  workspaceResizeStartX = event.clientX
+  workspaceResizeStartWidth = workspaceWidth.value
+  window.addEventListener('pointermove', moveWorkspaceResize)
+  window.addEventListener('pointerup', finishWorkspaceResize, { once: true })
+}
+
+function moveWorkspaceResize(event: PointerEvent) {
+  if (!workspaceResizing.value) return
+  const availableWidth = taskLayoutRef.value?.clientWidth || window.innerWidth
+  const maxWidth = Math.min(480, Math.max(260, Math.floor(availableWidth * 0.45)))
+  workspaceWidth.value = Math.min(
+    maxWidth,
+    clampWorkspaceWidth(workspaceResizeStartWidth + workspaceResizeStartX - event.clientX),
+  )
+}
+
+function finishWorkspaceResize() {
+  if (!workspaceResizing.value) return
+  workspaceResizing.value = false
+  window.removeEventListener('pointermove', moveWorkspaceResize)
+  localStorage.setItem('teambuddy.workspace-panel.width', String(workspaceWidth.value))
+}
+
+function resizeWorkspaceWithKeyboard(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return
+  event.preventDefault()
+  const delta = event.key === 'ArrowLeft' ? 16 : -16
+  workspaceWidth.value = clampWorkspaceWidth(workspaceWidth.value + delta)
+  localStorage.setItem('teambuddy.workspace-panel.width', String(workspaceWidth.value))
+}
+
 async function openSelectedTerminal() {
   const workDir = task.value?.work_dir || task.value?.task_dir || ''
   if (!workDir || openingTerminal.value) return
   openingTerminal.value = true
-  try { await openTerminal(workDir) } catch (error) { message.error(error instanceof Error ? error.message : t('workflows.task.progress.openTerminalFailed')) } finally { openingTerminal.value = false }
+  try {
+    await openTerminal(workDir)
+  } catch (error) {
+    message.error(
+      error instanceof Error ? error.message : t('workflows.task.progress.openTerminalFailed'),
+    )
+  } finally {
+    openingTerminal.value = false
+  }
 }
 
 async function handleOpenVibeTool() {
@@ -1440,7 +1581,11 @@ async function handleOpenVibeTool() {
       message.warning(t('workflows.task.detail.toolUnavailable', { tool: toolName }))
     }
   } catch (error) {
-    message.error(error instanceof Error ? error.message : t('workflows.task.detail.toolOpenFailed', { tool: toolName }))
+    message.error(
+      error instanceof Error
+        ? error.message
+        : t('workflows.task.detail.toolOpenFailed', { tool: toolName }),
+    )
   } finally {
     codexBusy.value = false
   }
@@ -1466,9 +1611,10 @@ async function toggleRead() {
 }
 
 async function unarchiveConversationIfNeeded(taskUuid: string) {
-  const isArchived = selectedConversation.value?.task_uuid === taskUuid
-    ? selectedConversation.value.is_archived
-    : conversationStore.allConversations.find((item) => item.task_uuid === taskUuid)?.is_archived
+  const isArchived =
+    selectedConversation.value?.task_uuid === taskUuid
+      ? selectedConversation.value.is_archived
+      : conversationStore.allConversations.find((item) => item.task_uuid === taskUuid)?.is_archived
   if (!isArchived) return
   await conversationStore.archiveTask(taskUuid, false)
   for (const item of [...notifications.value, ...temporaryNotifications.value]) {
@@ -1481,7 +1627,11 @@ async function unarchiveCurrentTask() {
   try {
     await unarchiveConversationIfNeeded(selectedTaskUuid.value)
     message.success(t('layout.sidebar.unarchive') || '已取消归档')
-    await Promise.all([conversationStore.loadConversations(true), loadNotifications(true), loadSelectedTask()])
+    await Promise.all([
+      conversationStore.loadConversations(true),
+      loadNotifications(true),
+      loadSelectedTask(),
+    ])
   } catch (err) {
     message.error(err instanceof Error ? err.message : '操作失败')
   }
@@ -1528,10 +1678,17 @@ async function submitExpertMessage(submission: ChatComposerSubmission) {
       request_id: crypto.randomUUID(),
     })
     await unarchiveConversationIfNeeded(selectedTaskUuid.value)
-    question.value = ''; composerRef.value?.resetAfterSubmit(); message.success(t('workflows.task.feedback.messageSent'))
+    question.value = ''
+    composerRef.value?.resetAfterSubmit()
+    message.success(t('workflows.task.feedback.messageSent'))
     await Promise.all([loadNotifications(true), loadSelectedTask()])
-  } catch (error) { message.error(error instanceof Error ? error.message : t('workflows.task.feedback.messageFailed')) }
-  finally { submitting.value = false }
+  } catch (error) {
+    message.error(
+      error instanceof Error ? error.message : t('workflows.task.feedback.messageFailed'),
+    )
+  } finally {
+    submitting.value = false
+  }
 }
 
 function showImagePreview(url: string) {
@@ -1550,7 +1707,9 @@ useLocalWS('task.changed', (data: { task_uuid?: string; deleted?: boolean }) => 
     const taskUuid = data.task_uuid
     notificationsLoadVersion += 1
     notifications.value = notifications.value.filter((item) => item.task_uuid !== taskUuid)
-    temporaryNotifications.value = temporaryNotifications.value.filter((item) => item.task_uuid !== taskUuid)
+    temporaryNotifications.value = temporaryNotifications.value.filter(
+      (item) => item.task_uuid !== taskUuid,
+    )
     taskViewCache.delete(taskUuid)
     void removePersistentTaskView(taskUuid)
     if (selectedTaskUuid.value === taskUuid) {
@@ -1595,6 +1754,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  finishWorkspaceResize()
+  window.removeEventListener('pointermove', moveWorkspaceResize)
   taskLoadVersion += 1
   notificationsLoadVersion += 1
   clearRefreshTimer()
@@ -1678,8 +1839,10 @@ onBeforeUnmount(() => {
   background: #e4e6eb;
 }
 
-.overview-toggle-button:active {
-  background: #d9dce2;
+.overview-toggle-button:active,
+.overview-toggle-button.active {
+  color: #3157e2;
+  background: #eaf0ff;
 }
 
 .overview-toggle-button:focus-visible {
@@ -1806,9 +1969,20 @@ onBeforeUnmount(() => {
   color: #262626;
   font-weight: 500;
 }
-.expert-overview { display:flex; align-items:center; gap:16px; min-height:44px; padding:0 24px; color:#595959; }
-.expert-overview strong { color:#262626; }
-.expert-overview span { font-size:12px; }
+.expert-overview {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 44px;
+  padding: 0 24px;
+  color: #595959;
+}
+.expert-overview strong {
+  color: #262626;
+}
+.expert-overview span {
+  font-size: 12px;
+}
 
 .task-overview-skeleton {
   min-height: 60px;
@@ -1851,9 +2025,74 @@ onBeforeUnmount(() => {
 }
 
 .task-layout {
+  position: relative;
   display: flex;
   min-height: 0;
   flex: 1;
+  container-name: task-layout;
+  container-type: inline-size;
+}
+
+.task-layout.is-resizing-workspace {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.workspace-pane {
+  position: relative;
+  min-width: 260px;
+  max-width: 480px;
+  min-height: 0;
+  flex: 0 0 300px;
+  background: #fff;
+}
+
+.workspace-resize-handle {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  width: 12px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-resize-handle::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: transparent;
+  content: '';
+  transform: translateX(-50%);
+}
+
+.workspace-resize-handle:hover::after,
+.workspace-resize-handle:focus-visible::after {
+  background: #3157e2;
+}
+
+.workspace-resize-handle:focus-visible {
+  outline: none;
+}
+
+@container task-layout (max-width: 760px) {
+  .workspace-pane {
+    position: absolute;
+    z-index: 20;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(380px, 88cqw) !important;
+    max-width: 88cqw;
+    box-shadow: -12px 0 32px rgba(15, 23, 42, 0.14);
+  }
+
+  .workspace-resize-handle {
+    display: none;
+  }
 }
 
 .task-layout.is-resizing-sidebar {
